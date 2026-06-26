@@ -1,0 +1,1872 @@
+/*
+Combined 808/606 + SH-101 Groovebox for SuperCollider
+
+How to use:
+1. Open this file in SuperCollider.
+2. Select all and evaluate.
+3. Press PLAY.
+4. Type a preset name and press SAVE. Saved presets appear in the RECALL menu.
+
+This patch combines an 808/606 style drum machine and an SH-101 style
+monosynth sequencer on one shared 16th-note clock. The synth has sends
+to tape delay and reverb.
+Presets are saved as text at:
+Platform.userAppSupportDir +/+ "combined_808_606_sh101_presets.txt"
+*/
+
+(
+s.waitForBoot({
+	var win, root, transportView, drumView, drumEditView, synthSeqView, sampleView, synthView, fxView, mixerView;
+	var masterBus, delayBus, reverbBus;
+	var masterSynth, delaySynth, reverbSynth;
+	var clock, task, playing = false, step = 0, clockTick = 0, drumStep = 0, synthStep = 0, sampleStep = 0, steps = 16;
+	var drumLoopStart = 0, drumLoopEnd = 15, synthLoopStart = 0, synthLoopEnd = 15;
+	var tempo = 126, swing = 0.04, masterAmp = 0.9;
+	var colors, font, smallFont;
+	var playButton, stopButton, tempoBox, swingSlider, rootBox, randomDrumButton, randomSynthButton, randomWavButton, randomAllButton, midiLearnButton, presetPrevButton, presetNextButton, presetExportButton, presetImportButton, midiExportButton, midiImportButton;
+	var drumLenBox, drumStartBox, drumEndBox, synthLenBox, synthStartBox, synthEndBox;
+	var drumDivMenu, synthDivMenu, sampleDivMenu, clockDivNames, clockDivTicks, drumDivIndex = 1, synthDivIndex = 1, sampleDivIndex = 1;
+	var delaySyncButton, delaySyncMenu, delaySyncNames, delaySyncBeats, delaySyncEnabled = 0, delaySyncIndex = 2, updateDelaySync;
+	var synthKeyMenu, synthScaleMenu, synthKeyRoot = 0, synthScaleIndex = 0;
+	var presetPath, midiMapPath, presets, presetNames, presetNameField, presetMenu, pendingPreset = nil;
+	var makePreset, applyPreset, queuePreset, selectPresetOffset, savePreset, loadPresets, refreshPresetMenu, exportPresets, importPresets, exportMidiMappings, importMidiMappings, randomizeDrums, randomizeSynth, randomizeWav, randomizeAll, refreshMachineGui;
+	var drumVoices, drumButtons, drumClearButtons, drumMuteButtons, drumLevelSliders, drumVoiceButtons, selectedDrumVoice = 0;
+	var drumParamOrder, drumParamRows, drumParamKeys, drumParamSpecs, drumParamLabel, drumParamSpec, updateDrumEditor;
+	var mixerRows, synthMixer, sampleMixer, meterLevels, makeMixerRow, refreshMixerGui, updateMeters;
+	var midiMixVolumeCCs, midiMixFilterCCs, midiMixReverbCCs, midiMixDelayCCs, midiMixWavFilterCC, midiMixWavReverbCC, midiMixWavDelayCC, midiMixMasterCC, midiMappings, midiNoteMappings, midiActionLatches, midiLearnActive = false, midiLearnParam = nil, setupMidiMix, setMixerChannel, registerMidiLearn, applyMidiLearnParam, applyMidiNoteParam, saveMidiMappings, loadMidiMappings;
+	var synthNotes, synthGates, synthAccents, synthSlides, synthStepViews, synthGateButtons, synthNoteSliders, synthNoteLabels, synthAccentButtons, synthSlideButtons;
+	var synthLfoShapeMenu, synthLfoDestMenu, synthLfoControls, synthLfoOrder, synthLfoSpec, synthLfoShapeNames, synthLfoDestNames;
+	var synthKeyNames, synthScaleNames, synthScaleIntervals, synthPythRatios, rootNoteNames, quantizeToScale;
+	var sampleBuf, samplePath = "", sampleSlices, sampleSliceSliders, sampleSliceLabels, sampleNameLabel, sampleFilterMenu, sampleParams, sampleParamControls, sampleParamOrder, sampleParamSpec;
+	var synthParams, synthParamControls, synthParamOrder, synthEnvControls, synthEnvOrder, synthEnvSpec, fxParams, fxParamControls, fxParamOrder, fxParamSpec, masterCompParams, masterCompControls, masterCompOrder, masterVolumeControl, masterMeter, baseMidi = 36;
+	var makeLabel, makeVSlider, makeHParam, mixPost, redrawAll, triggerDrums, triggerSynth, triggerSample, startClock, stopClock, handleSpaceKey, currentFreq;
+
+	Window.closeAll;
+
+	colors = (
+		bg: Color.new255(14, 15, 16),
+		panel: Color.new255(29, 32, 34),
+		panel2: Color.new255(42, 46, 48),
+		text: Color.new255(232, 232, 224),
+		muted: Color.new255(145, 151, 150),
+		red: Color.new255(238, 82, 69),
+		green: Color.new255(96, 220, 150),
+		yellow: Color.new255(238, 207, 92),
+		orange: Color.new255(241, 142, 72),
+		blue: Color.new255(92, 170, 230),
+		off: Color.new255(55, 59, 62)
+	);
+
+	font = Font("Helvetica", 13);
+	smallFont = Font("Helvetica", 10);
+
+	mixPost = { |sig, mixFilter=0.5, mixDrive=0|
+		sig = LPF.ar(sig, mixFilter.linlin(0, 0.5, 250, 20000).clip(250, 20000));
+		sig = HPF.ar(sig, mixFilter.linlin(0.5, 1, 20, 6000).clip(20, 6000));
+		tanh(sig * mixDrive.linlin(0, 1, 1, 8)) * mixDrive.linlin(0, 1, 1, 0.45);
+	};
+
+	masterBus = Bus.audio(s, 2);
+	delayBus = Bus.audio(s, 2);
+	reverbBus = Bus.audio(s, 2);
+
+	SynthDef(\comboMaster, { |in=0, out=0, amp=0.9, threshold=0.45, ratio=0.5, attack=0.18, release=0.45, makeup=0.55, drive=0.12|
+		var sig = In.ar(in, 2);
+		sig = LeakDC.ar(sig);
+		sig = Compander.ar(
+			sig,
+			sig,
+			threshold.linexp(0, 1, 0.08, 0.95),
+			1,
+			ratio.linlin(0, 1, 0.82, 0.16),
+			attack.linexp(0, 1, 0.001, 0.03),
+			release.linexp(0, 1, 0.05, 0.7)
+		);
+		sig = tanh(sig * drive.linlin(0, 1, 1.05, 5.5)) * makeup.linlin(0, 1, 0.55, 1.8) * amp;
+		Out.ar(out, sig);
+	}).add;
+
+	SynthDef(\comboTapeDelay, { |in=0, out=0, time=0.3, feedback=0.34, wow=0.014, tone=0.55, wet=0.42|
+		var src = In.ar(in, 2);
+		var delayed = LocalIn.ar(2);
+		var wobble = SinOsc.kr(0.34, [0, 1.8]).range(time * (1 - wow), time * (1 + wow));
+		var loop = src + (delayed * feedback.clip(0, 0.9));
+		loop = DelayC.ar(loop, 1.4, wobble.clip(0.02, 1.4));
+		loop = HPF.ar(LPF.ar(loop, tone.linexp(0, 1, 800, 9000)), 80);
+		loop = tanh(loop * 1.7) * 0.72;
+		LocalOut.ar(loop);
+		Out.ar(out, loop * wet);
+	}).add;
+
+	SynthDef(\comboReverb, { |in=0, out=0, room=0.68, damp=0.45, wet=0.3, shimmer=0|
+		var src, lift, verb, wetSig;
+		src = In.ar(in, 2);
+		lift = PitchShift.ar(src, 0.18, 2, 0.01, 0.08) * shimmer.clip(0, 1);
+		lift = HPF.ar(lift, 1200);
+		wetSig = src + lift;
+		verb = FreeVerb2.ar(wetSig[0], wetSig[1], wet.clip(0, 1), room.clip(0, 1), damp.clip(0, 1));
+		Out.ar(out, verb * 0.9);
+	}).add;
+
+	SynthDef(\comboSampleSlice, { |out=0, fxDelay=0, fxRev=0, buf=0, slice=0, stepDur=0.125,
+		level=0.75, pan=0, sendDelay=0.05, sendRev=0.08, filterMode=0, cutoff=0.85, res=0.2, pitch=1, mixFilter=0.5, mixDrive=0|
+		var frames, startFrame, sliceDur, rate, env, sig, freq, rq, lp, hp, bp;
+		frames = BufFrames.kr(buf);
+		startFrame = frames * (slice.clip(0, 15) / 16);
+		sliceDur = BufDur.kr(buf) / 16;
+		rate = BufRateScale.kr(buf) * (sliceDur / stepDur.max(0.02)) * pitch.clip(0, 2);
+		env = EnvGen.kr(Env.linen(0.002, stepDur.max(0.02) * 0.96, 0.01), doneAction: 2);
+		sig = PlayBuf.ar(2, buf, rate, startPos: startFrame, doneAction: 0);
+		freq = cutoff.linexp(0, 1, 80, 16000);
+		rq = res.linlin(0, 1, 0.9, 0.05);
+		lp = RLPF.ar(sig, freq, rq);
+		hp = RHPF.ar(sig, freq, rq);
+		bp = BPF.ar(sig, freq, rq);
+		sig = Select.ar(filterMode.clip(0, 2), [lp, hp, bp]);
+		sig = Balance2.ar(sig[0], sig[1], pan, level) * env;
+		sig = mixPost.(sig, mixFilter, mixDrive);
+		Out.ar(out, sig); Out.ar(fxDelay, sig * sendDelay); Out.ar(fxRev, sig * sendRev);
+	}).add;
+
+	SynthDef(\comboKick, { |out=0, fxDelay=0, fxRev=0, amp=0.9, pan=0, sendDelay=0, sendRev=0, tune=48, decay=0.75, punch=0.7, drive=0.45, mixFilter=0.5, mixDrive=0|
+		var env = EnvGen.kr(Env.perc(0.001, decay, 1, -6), doneAction: 2);
+		var pitch = EnvGen.kr(Env([tune + (punch * 42), tune, tune - 7], [0.035, decay], [-7, -5])).midicps;
+		var sig = SinOsc.ar(pitch) * env;
+		sig = sig + (BPF.ar(WhiteNoise.ar, 5200, 0.5) * EnvGen.kr(Env.perc(0.001, 0.025)) * 0.22);
+		sig = Pan2.ar(tanh(sig * drive.linlin(0, 1, 1, 6)) * amp, pan);
+		sig = mixPost.(sig, mixFilter, mixDrive);
+		Out.ar(out, sig); Out.ar(fxDelay, sig * sendDelay); Out.ar(fxRev, sig * sendRev);
+	}).add;
+
+	SynthDef(\comboSnare, { |out=0, fxDelay=0, fxRev=0, amp=0.75, pan=0, sendDelay=0, sendRev=0, tune=180, decay=0.3, noise=0.65, tone=0.55, drive=0.2, mixFilter=0.5, mixDrive=0|
+		var env, body, hiss, sig;
+		env = EnvGen.kr(Env.perc(0.001, decay, 1, -5), doneAction: 2);
+		body = SinOsc.ar([tune, tune * 1.5], 0, [0.5, 0.25]).sum * env;
+		hiss = BPF.ar(WhiteNoise.ar, tone.linexp(0, 1, 1100, 7500), 0.55) * EnvGen.kr(Env.perc(0.001, decay * 0.85, noise, -4));
+		sig = Pan2.ar(tanh((body + hiss) * drive.linlin(0, 1, 1, 5)) * amp, pan);
+		sig = mixPost.(sig, mixFilter, mixDrive);
+		Out.ar(out, sig); Out.ar(fxDelay, sig * sendDelay); Out.ar(fxRev, sig * sendRev);
+	}).add;
+
+	SynthDef(\comboClap, { |out=0, fxDelay=0, fxRev=0, amp=0.55, pan=0, sendDelay=0, sendRev=0, decay=0.4, tone=0.5, drive=0.25, spread=0.35, mixFilter=0.5, mixDrive=0|
+		var env, sig, src;
+		env = EnvGen.kr(Env([0, 1, 0.2, 1, 0.2, 1, 0], [0.002, 0.045, 0.006, 0.055, 0.006, decay], -4), doneAction: 2);
+		sig = BPF.ar(WhiteNoise.ar, tone.linexp(0, 1, 900, 4200), 0.7) * env;
+		src = tanh(sig * drive.linlin(0, 1, 1, 5)) * amp;
+		sig = Splay.ar([src, DelayC.ar(src, 0.03, spread.clip(0, 1) * 0.018)], spread.clip(0, 1), 1, pan);
+		sig = mixPost.(sig, mixFilter, mixDrive);
+		Out.ar(out, sig); Out.ar(fxDelay, sig * sendDelay); Out.ar(fxRev, sig * sendRev);
+	}).add;
+
+	SynthDef(\comboHat, { |out=0, fxDelay=0, fxRev=0, amp=0.45, pan=0, sendDelay=0, sendRev=0, decay=0.08, tone=0.72, open=0, drive=0.12, mixFilter=0.5, mixDrive=0|
+		var env = EnvGen.kr(Env.perc(0.001, decay + (open * 0.45), 1, -7), doneAction: 2);
+		var freqs = [4010, 5310, 6930, 8150, 10750, 12120] * tone.linlin(0, 1, 0.72, 1.32);
+		var sig = Mix.ar(SinOsc.ar(freqs, 0, 0.07)) + (HPF.ar(WhiteNoise.ar, 5500) * 0.35);
+		sig = BPF.ar(sig, tone.linexp(0, 1, 4600, 12000), 0.8) * env;
+		sig = Pan2.ar(tanh(sig * drive.linlin(0, 1, 1, 4)) * amp, pan);
+		sig = mixPost.(sig, mixFilter, mixDrive);
+		Out.ar(out, sig); Out.ar(fxDelay, sig * sendDelay); Out.ar(fxRev, sig * sendRev);
+	}).add;
+
+	SynthDef(\comboCymbal606, { |out=0, fxDelay=0, fxRev=0, amp=0.48, pan=0, sendDelay=0, sendRev=0, pitch=0.55, decay=0.75, tone=0.72, metal=0.65, drive=0.18, mixFilter=0.5, mixDrive=0|
+		var env, freqs, clang, noise, sig;
+		env = EnvGen.kr(Env.perc(0.002, decay.clip(0.05, 1.8), 1, -5), doneAction: 2);
+		freqs = [827, 1254, 1846, 2673, 3890, 5632] * pitch.linlin(0, 1, 0.72, 1.48);
+		clang = Mix.ar(Pulse.ar(freqs, 0.5, 0.045)) * metal.linlin(0, 1, 0.45, 1.35);
+		noise = HPF.ar(WhiteNoise.ar(0.3), tone.linexp(0, 1, 3200, 9000));
+		sig = BPF.ar(clang + noise, tone.linexp(0, 1, 4200, 12000), 0.55);
+		sig = sig + (HPF.ar(clang, 6000) * 0.35);
+		sig = Pan2.ar(tanh(sig * drive.linlin(0, 1, 1, 5)) * env * amp, pan);
+		sig = mixPost.(sig, mixFilter, mixDrive);
+		Out.ar(out, sig); Out.ar(fxDelay, sig * sendDelay); Out.ar(fxRev, sig * sendRev);
+	}).add;
+
+	SynthDef(\comboTom, { |out=0, fxDelay=0, fxRev=0, amp=0.55, pan=0, sendDelay=0, sendRev=0, tune=55, decay=0.45, sweep=0.5, drive=0.2, mixFilter=0.5, mixDrive=0|
+		var env = EnvGen.kr(Env.perc(0.001, decay, 1, -6), doneAction: 2);
+		var pitch = EnvGen.kr(Env([tune + sweep.linlin(0, 1, 0, 36), tune], [decay * 0.35], -7)).midicps;
+		var sig = Pan2.ar(tanh(SinOsc.ar(pitch) * env * drive.linlin(0, 1, 1, 4)) * amp, pan);
+		sig = mixPost.(sig, mixFilter, mixDrive);
+		Out.ar(out, sig); Out.ar(fxDelay, sig * sendDelay); Out.ar(fxRev, sig * sendRev);
+	}).add;
+
+	SynthDef(\comboSh101, { |out=0, fxDelay=0, fxRev=0, freq=110, sustainTime=0.12, accent=0,
+		wave=0.5, saw=0.8, pulse=0.35, sub=0.55, noise=0.02, pw=0.48, cutoff=0.45, res=0.28, envAmt=0.45,
+		attack=0.005, decay=0.22, sustain=0.18, release=0.08, lfoRate=0.24, lfoPitch=0, lfoFilter=0.08, lfoShape=0, lfoDest=2, lfoAmount=0.08,
+		drive=0.22, level=0.72, delaySend=0.18, reverbSend=0.12, pan=0, mixFilter=0.5, mixDrive=0|
+		var lfoRateHz, lfo, pitch, env, fenv, mainOsc, osc, filtFreq, sig, amp, pitchAmt, filterAmt, volumeAmt;
+		lfoRateHz = lfoRate.linexp(0, 1, 0.05, 18);
+		lfo = Select.kr(lfoShape.clip(0, 4), [
+			SinOsc.kr(lfoRateHz),
+			LFTri.kr(lfoRateHz),
+			LFSaw.kr(lfoRateHz),
+			LFPulse.kr(lfoRateHz, 0, 0.5).range(-1, 1),
+			LFNoise1.kr(lfoRateHz)
+		]);
+		pitchAmt = Select.kr(lfoDest.clip(0, 2), [lfoAmount * 12, 0, 0]);
+		filterAmt = Select.kr(lfoDest.clip(0, 2), [0, 0, lfoAmount]);
+		volumeAmt = Select.kr(lfoDest.clip(0, 2), [0, lfoAmount, 0]);
+		pitch = freq * (2 ** ((lfo * pitchAmt) / 12));
+		env = EnvGen.kr(Env.linen(attack, sustainTime.max(0.02), release, 1, -4), doneAction: 2);
+		fenv = EnvGen.kr(Env([0, 1, sustain, 0], [attack.max(0.001), decay.max(0.001), release.max(0.001)], -4));
+		mainOsc = SelectX.ar(wave.clip(0, 1) * 2, [
+			SinOsc.ar(pitch),
+			Saw.ar(pitch),
+			Pulse.ar(pitch, pw.clip(0.05, 0.95))
+		]);
+		osc = mainOsc + (Saw.ar(pitch) * saw * 0.18) + (Pulse.ar(pitch, pw.clip(0.05, 0.95)) * pulse * 0.18) + (Pulse.ar(pitch * 0.5, 0.5) * sub) + (WhiteNoise.ar * noise);
+		filtFreq = cutoff.linexp(0, 1, 90, 9000) * (1 + (fenv * envAmt * 4.5)) * (1 + (lfo * filterAmt * 0.65));
+		sig = RLPF.ar(osc, filtFreq.clip(60, 16000), res.linlin(0, 1, 0.95, 0.08));
+		sig = tanh(sig * drive.linlin(0, 1, 1, 7));
+		amp = level * (1 + (accent * 0.45)) * (1 + (lfo * volumeAmt)).clip(0, 2);
+		sig = Pan2.ar(sig * env * amp, pan);
+		sig = mixPost.(sig, mixFilter, mixDrive);
+		Out.ar(out, sig); Out.ar(fxDelay, sig * delaySend); Out.ar(fxRev, sig * reverbSend);
+	}).add;
+
+	s.sync;
+
+	delaySynth = Synth.tail(s, \comboTapeDelay, [\in, delayBus, \out, masterBus]);
+	reverbSynth = Synth.tail(s, \comboReverb, [\in, reverbBus, \out, masterBus]);
+	masterSynth = Synth.tail(s, \comboMaster, [\in, masterBus, \out, 0, \amp, masterAmp]);
+
+	clock = TempoClock.new(tempo / 60);
+	clockDivNames = ["1/32", "1/16", "1/8", "1/4", "1/2", "1 BAR"];
+	clockDivTicks = [1, 2, 4, 8, 16, 32];
+
+	drumVoices = [
+		(name: "BD", synth: \comboKick, pattern: #[1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,0], level: 0.9, pan: 0, delay: 0.04, reverb: 0.02, muted: 0, solo: 0, mixFilter: 0.5, mixDrive: 0, args: (tune: 48, decay: 0.75, punch: 0.7, drive: 0.45)),
+		(name: "SD", synth: \comboSnare, pattern: #[0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0], level: 0.75, pan: 0.05, delay: 0.07, reverb: 0.12, muted: 0, solo: 0, mixFilter: 0.5, mixDrive: 0, args: (tune: 180, decay: 0.3, noise: 0.65, tone: 0.55, drive: 0.2)),
+		(name: "CP", synth: \comboClap, pattern: #[0,0,0,0, 0,0,0,0, 0,0,1,0, 0,0,0,0], level: 0.55, pan: 0.1, delay: 0.14, reverb: 0.25, muted: 0, solo: 0, mixFilter: 0.5, mixDrive: 0, args: (decay: 0.4, tone: 0.5, drive: 0.25, spread: 0.35)),
+		(name: "CH", synth: \comboHat, pattern: #[1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,0], level: 0.42, pan: -0.12, delay: 0.05, reverb: 0.04, muted: 0, solo: 0, mixFilter: 0.5, mixDrive: 0, args: (decay: 0.07, tone: 0.72, open: 0, drive: 0.12)),
+		(name: "OH", synth: \comboHat, pattern: #[0,0,0,0, 0,0,1,0, 0,0,0,0, 0,0,1,0], level: 0.45, pan: 0.18, delay: 0.14, reverb: 0.18, muted: 0, solo: 0, mixFilter: 0.5, mixDrive: 0, args: (decay: 0.12, tone: 0.68, open: 1, drive: 0.1)),
+		(name: "CY", synth: \comboCymbal606, pattern: #[0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0], level: 0.42, pan: 0.24, delay: 0.16, reverb: 0.2, muted: 0, solo: 0, mixFilter: 0.5, mixDrive: 0, args: (pitch: 0.55, decay: 0.75, tone: 0.72, metal: 0.65, drive: 0.18)),
+		(name: "TM", synth: \comboTom, pattern: #[0,0,0,0, 0,0,0,0, 0,1,0,0, 0,0,1,0], level: 0.5, pan: -0.18, delay: 0.08, reverb: 0.1, muted: 0, solo: 0, mixFilter: 0.5, mixDrive: 0, args: (tune: 55, decay: 0.45, sweep: 0.5, drive: 0.2))
+	];
+	synthMixer = (muted: 0, solo: 0, mixFilter: 0.5, mixDrive: 0);
+	sampleMixer = (muted: 0, solo: 0, mixFilter: 0.5, mixDrive: 0);
+	meterLevels = Array.fill(drumVoices.size + 2, 0);
+	midiMixVolumeCCs = [19, 23, 27, 31, 49, 53, 57, 61];
+	midiMixFilterCCs = [16, 20, 24, 28, 46, 50, 54, 58];
+	midiMixReverbCCs = [17, 21, 25, 29, 47, 51, 55, 59];
+	midiMixDelayCCs = [18, 22, 26, 30, 48, 52, 56, 60];
+	midiMixWavFilterCC = 18;
+	midiMixWavReverbCC = 22;
+	midiMixWavDelayCC = 26;
+	midiMixMasterCC = 62;
+
+	synthNotes = [0, 0, 7, 0, 10, 7, 3, 0, 12, 0, 7, 0, 10, 7, 3, -5];
+	synthGates = [1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1];
+	synthAccents = [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0];
+	synthSlides = Array.fill(steps, 0);
+	synthKeyNames = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
+	rootNoteNames = Array.fill(49, { |i|
+		var midi, octave;
+		midi = 24 + i;
+		octave = ((midi / 12).floor - 1).asInteger;
+		synthKeyNames[midi % 12] ++ octave.asString;
+	});
+	synthScaleNames = [
+		"Chromatic", "Ionian", "Dorian", "Phrygian", "Lydian", "Mixolydian", "Aeolian", "Locrian",
+		"Major Pent", "Minor Pent", "Blues", "Harmonic Min", "Melodic Min", "Whole Tone",
+		"Diminished", "Hungarian Min", "Phrygian Dom", "Enigmatic", "Pythagorean"
+	];
+	synthScaleIntervals = [
+		[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+		[0, 2, 4, 5, 7, 9, 11],
+		[0, 2, 3, 5, 7, 9, 10],
+		[0, 1, 3, 5, 7, 8, 10],
+		[0, 2, 4, 6, 7, 9, 11],
+		[0, 2, 4, 5, 7, 9, 10],
+		[0, 2, 3, 5, 7, 8, 10],
+		[0, 1, 3, 5, 6, 8, 10],
+		[0, 2, 4, 7, 9],
+		[0, 3, 5, 7, 10],
+		[0, 3, 5, 6, 7, 10],
+		[0, 2, 3, 5, 7, 8, 11],
+		[0, 2, 3, 5, 7, 9, 11],
+		[0, 2, 4, 6, 8, 10],
+		[0, 2, 3, 5, 6, 8, 9, 11],
+		[0, 2, 3, 6, 7, 8, 11],
+		[0, 1, 4, 5, 7, 8, 10],
+		[0, 1, 4, 6, 8, 10, 11],
+		[0, 2, 4, 5, 7, 9, 11]
+	];
+	synthPythRatios = [1, 256/243, 9/8, 32/27, 81/64, 4/3, 729/512, 3/2, 128/81, 27/16, 16/9, 243/128];
+	sampleBuf = nil;
+	sampleSlices = Array.fill(steps, { |i| i });
+	sampleParams = (
+		level: 0.75, pan: 0, delaySend: 0.05, reverbSend: 0.08,
+		filterMode: 0, cutoff: 0.85, res: 0.2, pitch: 1
+	);
+	sampleParamOrder = [\level, \pitch, \cutoff, \res, \delaySend, \reverbSend, \pan];
+	sampleParamSpec = (
+		level: [0, 1], pitch: [0, 2], cutoff: [0, 1], res: [0, 1], delaySend: [0, 1], reverbSend: [0, 1], pan: [-1, 1]
+	);
+
+	synthParams = (
+		wave: 0.5, saw: 0.8, pulse: 0.35, sub: 0.55, noise: 0.02, pw: 0.48,
+		cutoff: 0.45, res: 0.28, envAmt: 0.45, attack: 0.005, decay: 0.22, sustain: 0.18, release: 0.08,
+		lfoRate: 0.24, lfoPitch: 0.0, lfoFilter: 0.08, lfoShape: 0, lfoDest: 2, lfoAmount: 0.08, drive: 0.22, level: 0.72,
+		delaySend: 0.18, reverbSend: 0.12, gateLen: 0.78
+	);
+	synthParamOrder = [\wave, \pw, \sub, \noise, \cutoff, \res, \envAmt, \drive, \delaySend, \reverbSend];
+	synthEnvOrder = [\attack, \decay, \sustain, \release];
+	synthLfoOrder = [\lfoRate, \lfoAmount];
+	synthLfoShapeNames = ["SINE", "TRI", "SAW", "SQR", "RAND"];
+	synthLfoDestNames = ["PITCH", "VOL", "FILT"];
+	synthEnvSpec = (
+		attack: [0.001, 0.15], decay: [0.02, 0.8], sustain: [0, 1], release: [0.01, 0.8]
+	);
+	synthLfoSpec = (
+		lfoRate: [0, 1], lfoAmount: [0, 1]
+	);
+	fxParams = (
+		delayTime: 0.3, delayFeedback: 0.34, delayWow: 0.014, delayTone: 0.55, delayWet: 0.42,
+		reverbRoom: 0.68, reverbDamp: 0.45, reverbWet: 0.3, reverbShimmer: 0
+	);
+	fxParamOrder = [\delayTime, \delayFeedback, \delayWow, \delayTone, \delayWet, \reverbRoom, \reverbDamp, \reverbWet, \reverbShimmer];
+	fxParamSpec = (
+		delayTime: [0.05, 1.1], delayFeedback: [0, 0.9], delayWow: [0, 0.08], delayTone: [0, 1], delayWet: [0, 1],
+		reverbRoom: [0, 1], reverbDamp: [0, 1], reverbWet: [0, 1], reverbShimmer: [0, 1]
+	);
+	delaySyncNames = ["1/16", "1/8", "1/4", "1/2", "1 BAR"];
+	delaySyncBeats = [0.25, 0.5, 1, 2, 4];
+	updateDelaySync = {
+		if(delaySyncEnabled == 1) {
+			fxParams.put(\delayTime, ((60 / tempo) * delaySyncBeats[delaySyncIndex]).clip(0.05, 1.1));
+			delaySynth.set(\time, fxParams[\delayTime]);
+		};
+	};
+	masterCompParams = (
+		threshold: 0.45, ratio: 0.5, attack: 0.18, release: 0.45, makeup: 0.55, drive: 0.12
+	);
+	masterCompOrder = [\threshold, \ratio, \attack, \release, \makeup, \drive];
+	masterSynth.set(\threshold, masterCompParams[\threshold], \ratio, masterCompParams[\ratio], \attack, masterCompParams[\attack], \release, masterCompParams[\release], \makeup, masterCompParams[\makeup], \drive, masterCompParams[\drive]);
+	presetPath = Platform.userAppSupportDir +/+ "combined_808_606_sh101_presets.txt";
+	midiMapPath = Platform.userAppSupportDir +/+ "combined_808_606_sh101_midi_map.txt";
+	presets = Dictionary.new;
+	presetNames = [];
+	midiMappings = Dictionary.new;
+	midiNoteMappings = Dictionary.new;
+	midiActionLatches = Dictionary.new;
+
+	saveMidiMappings = {
+		File.use(midiMapPath, "w", { |file|
+			file.write(Dictionary.newFrom([\cc, midiMappings, \note, midiNoteMappings]).asCompileString)
+		});
+	};
+
+	loadMidiMappings = {
+		var text, loaded;
+		if(File.exists(midiMapPath)) {
+			text = File.readAllString(midiMapPath);
+			if(text.notNil and: { text.size > 0 }) {
+				loaded = try { text.interpret } { Dictionary.new };
+				if(loaded.isKindOf(Dictionary)) {
+					if(loaded[\cc].notNil) {
+						midiMappings = loaded[\cc];
+						midiNoteMappings = loaded[\note] ? Dictionary.new;
+					} {
+						midiMappings = loaded;
+						midiNoteMappings = Dictionary.new;
+					};
+				};
+			};
+		};
+	};
+
+	registerMidiLearn = { |param|
+		if(midiLearnActive and: { param.notNil }) {
+			midiLearnParam = param;
+			if(midiLearnButton.notNil) {
+				midiLearnButton.value_(1);
+				midiLearnButton.states_([["LRN", colors[\text], colors[\panel2]], ["MIDI", colors[\bg], colors[\orange]]]);
+			};
+		};
+	};
+
+	quantizeToScale = { |note|
+		var scale, best, bestDiff;
+		scale = synthScaleIntervals[synthScaleIndex.clip(0, synthScaleIntervals.size - 1)];
+		best = note.asInteger;
+		bestDiff = 999;
+		(-6..6).do({ |oct|
+			scale.do({ |pc|
+				var cand, diff;
+				cand = pc + (oct * 12);
+				diff = (note - cand).abs;
+				if(diff < bestDiff) {
+					best = cand;
+					bestDiff = diff;
+				};
+			});
+		});
+		best;
+	};
+
+	currentFreq = { |note|
+		var q, rootMidi, pc, oct, ratio;
+		q = quantizeToScale.(note.asInteger);
+		rootMidi = (((baseMidi / 12).floor * 12) + synthKeyRoot).clip(0, 127);
+		if(synthScaleNames[synthScaleIndex] == "Pythagorean") {
+			pc = q.wrap(0, 11).asInteger;
+			oct = ((q - pc) / 12).floor;
+			ratio = synthPythRatios[pc];
+			rootMidi.midicps * (2 ** oct) * ratio;
+		} {
+			(rootMidi + q).clip(0, 127).midicps;
+		};
+	};
+
+	makeLabel = { |parent, bounds, text, color|
+		StaticText(parent, bounds).string_(text).font_(smallFont).stringColor_(color ? colors[\text]).align_(\center).background_(Color.clear);
+	};
+
+	makeVSlider = { |parent, bounds, label, value, action, color, midiParam=nil|
+		var slider, box;
+		makeLabel.(parent, Rect(bounds.left, bounds.top, bounds.width, 14), label, colors[\muted]);
+		slider = Slider(parent, Rect(bounds.left + 6, bounds.top + 18, bounds.width - 12, bounds.height - 42))
+			.orientation_(\vertical).value_(value.clip(0, 1)).background_(colors[\panel2]).knobColor_(color ? colors[\green]);
+		box = NumberBox(parent, Rect(bounds.left + 4, bounds.bottom - 22, bounds.width - 8, 20)).value_(value.round(0.01)).clipLo_(0).clipHi_(1).font_(smallFont).background_(colors[\panel2]).stringColor_(colors[\text]).normalColor_(colors[\text]).typingColor_(colors[\text]);
+		slider.action_({ |sl| box.value_(sl.value.round(0.01)); registerMidiLearn.(midiParam); action.(sl.value) });
+		box.action_({ |nb|
+			var val;
+			val = nb.value.clip(0, 1);
+			slider.value_(val);
+			registerMidiLearn.(midiParam);
+			action.(val);
+		});
+		(slider: slider, box: box);
+	};
+
+	makeHParam = { |parent, bounds, label, value, action, color, midiParam=nil|
+		var row, name, slider, box;
+		row = CompositeView(parent, bounds).background_(colors[\panel]);
+		name = StaticText(row, Rect(0, 0, 58, bounds.height))
+			.string_(label)
+			.font_(smallFont.boldVariant)
+			.stringColor_(colors[\text])
+			.align_(\center)
+			.background_(colors[\panel2]);
+		slider = Slider(row, Rect(66, 4, bounds.width - 128, bounds.height - 8))
+			.orientation_(\horizontal)
+			.value_(value.clip(0, 1))
+			.background_(colors[\panel2])
+			.knobColor_(color ? colors[\green]);
+		box = NumberBox(row, Rect(bounds.width - 54, 3, 54, bounds.height - 6))
+			.value_(value.round(0.01))
+			.clipLo_(0)
+			.clipHi_(1)
+			.font_(smallFont)
+			.background_(colors[\panel2])
+			.stringColor_(colors[\text])
+			.normalColor_(colors[\text])
+			.typingColor_(colors[\text]);
+		slider.action_({ |sl|
+			box.value_(sl.value.round(0.01));
+			registerMidiLearn.(midiParam);
+			action.(sl.value);
+		});
+		box.action_({ |nb|
+			var val;
+			val = nb.value.clip(0, 1);
+			slider.value_(val);
+			registerMidiLearn.(midiParam);
+			action.(val);
+		});
+		(row: row, name: name, slider: slider, box: box);
+	};
+
+	makeMixerRow = { |parent, y, label, levelGet, levelSet, muteGet, muteSet, soloGet, soloSet, filterGet, filterSet, driveGet, driveSet, levelParam=nil, filterParam=nil, driveParam=nil, muteParam=nil, soloParam=nil|
+		var row, lvl, filt, drv, mute, solo, meter;
+		row = CompositeView(parent, Rect(8, y, 244, 42)).background_(colors[\panel]);
+		StaticText(row, Rect(0, 3, 34, 14)).string_(label).font_(smallFont.boldVariant).stringColor_(colors[\text]).align_(\center).background_(Color.clear);
+		mute = Button(row, Rect(38, 2, 28, 18)).states_([["M", colors[\muted], colors[\off]], ["M", colors[\bg], colors[\red]]]).font_(smallFont.boldVariant).value_(muteGet.()).action_({ |b| registerMidiLearn.(muteParam); muteSet.(b.value.asInteger) });
+		solo = Button(row, Rect(70, 2, 28, 18)).states_([["S", colors[\muted], colors[\off]], ["S", colors[\bg], colors[\yellow]]]).font_(smallFont.boldVariant).value_(soloGet.()).action_({ |b| registerMidiLearn.(soloParam); soloSet.(b.value.asInteger) });
+		StaticText(row, Rect(104, 2, 38, 12)).string_("LVL").font_(smallFont).stringColor_(colors[\muted]).align_(\center).background_(Color.clear);
+		lvl = Slider(row, Rect(142, 4, 88, 14)).orientation_(\horizontal).value_(levelGet.()).background_(colors[\panel2]).knobColor_(colors[\orange]).action_({ |sl| registerMidiLearn.(levelParam); levelSet.(sl.value) });
+		StaticText(row, Rect(38, 24, 38, 12)).string_("FILT").font_(smallFont).stringColor_(colors[\muted]).align_(\center).background_(Color.clear);
+		filt = Slider(row, Rect(78, 25, 66, 12)).orientation_(\horizontal).value_(filterGet.()).background_(colors[\panel2]).knobColor_(colors[\blue]).action_({ |sl| registerMidiLearn.(filterParam); filterSet.(sl.value) });
+		StaticText(row, Rect(150, 24, 34, 12)).string_("DRV").font_(smallFont).stringColor_(colors[\muted]).align_(\center).background_(Color.clear);
+		drv = Slider(row, Rect(186, 25, 44, 12)).orientation_(\horizontal).value_(driveGet.()).background_(colors[\panel2]).knobColor_(colors[\red]).action_({ |sl| registerMidiLearn.(driveParam); driveSet.(sl.value) });
+		meter = LevelIndicator(row, Rect(234, 4, 8, 34)).value_(0).warning_(0.7).critical_(0.9);
+		(row: row, level: lvl, filter: filt, drive: drv, mute: mute, solo: solo, meter: meter);
+	};
+
+	drumParamOrder = [\tune, \pitch, \decay, \sweep, \punch, \noise, \tone, \open, \metal, \drive, \spread, \delay, \reverb, \pan];
+	drumParamLabel = { |key|
+		case
+		{ key == \tune } { "PITCH" }
+		{ key == \pitch } { "PITCH" }
+		{ key == \decay } { "DECAY" }
+		{ key == \sweep } { "SWEEP" }
+		{ key == \punch } { "PUNCH" }
+		{ key == \noise } { "NOISE" }
+		{ key == \tone } { "TONE" }
+		{ key == \open } { "OPEN" }
+		{ key == \metal } { "METAL" }
+		{ key == \drive } { "DRIVE" }
+		{ key == \spread } { "SPREAD" }
+		{ key == \delay } { "DLY" }
+		{ key == \reverb } { "REV" }
+		{ key == \pan } { "PAN" }
+		{ key.asString.toUpper };
+	};
+	drumParamSpec = { |voice, key|
+		case
+		{ key == \tune and: { voice[\name] == "SD" } } { [90, 320] }
+		{ key == \tune } { [30, 90] }
+		{ key == \decay } { [0.02, 1.4] }
+		{ key == \pan } { [-1, 1] }
+		{ [0, 1] };
+	};
+
+	updateMeters = {
+		var masterLevel;
+		if(meterLevels.notNil) {
+			meterLevels.do({ |value, i|
+				meterLevels[i] = (value * 0.72).clip(0, 1);
+				if(mixerRows.notNil and: { mixerRows[i].notNil }) {
+					mixerRows[i][\meter].value_(meterLevels[i]);
+				};
+			});
+			masterLevel = (meterLevels.sum * 0.55 * masterAmp).clip(0, 1);
+			if(masterMeter.notNil) { masterMeter.value_(masterLevel) };
+		};
+	};
+
+	redrawAll = {
+		drumButtons.do({ |row, vi|
+			row.do({ |button, si|
+				var on = drumVoices[vi][\pattern][si] == 1;
+				button.states_([
+					["OFF", colors[\muted], if(si == drumStep) { colors[\yellow] } { colors[\off] }],
+					["ON", colors[\bg], if(si == drumStep) { colors[\yellow] } { colors[\red] }]
+				]);
+				button.value_(if(on) { 1 } { 0 });
+			});
+		});
+		if(drumVoiceButtons.notNil) {
+			drumVoiceButtons.do({ |button, i|
+				button.value_(if(i == selectedDrumVoice) { 1 } { 0 });
+			});
+		};
+		synthStepViews.do({ |view, i|
+			var on = synthGates[i] == 1;
+			view.background_(if(i == synthStep) { colors[\yellow] } { if(on) { colors[\panel2] } { colors[\panel] } });
+			synthGateButtons[i].value_(if(on) { 1 } { 0 });
+			synthNoteSliders[i].value_(synthNotes[i].linlin(-24, 36, 0, 1).clip(0, 1));
+			synthNoteLabels[i].string_(synthNotes[i].asInteger.asString);
+			synthAccentButtons[i].value_(if(synthAccents[i] == 1) { 1 } { 0 });
+			synthSlideButtons[i].value_(if(synthSlides[i] == 1) { 1 } { 0 });
+		});
+		updateMeters.();
+	};
+
+	triggerDrums = {
+		var anySolo;
+		anySolo = drumVoices.any({ |voice| voice[\solo] == 1 }) or: { (synthMixer[\solo] == 1) or: { sampleMixer[\solo] == 1 } };
+		drumVoices.do({ |voice, i|
+			if((voice[\muted] == 0) and: { (anySolo.not or: { voice[\solo] == 1 }) and: { voice[\pattern][drumStep] == 1 } }) {
+				var args;
+				args = [\out, masterBus, \fxDelay, delayBus, \fxRev, reverbBus, \amp, voice[\level], \pan, voice[\pan], \sendDelay, voice[\delay], \sendRev, voice[\reverb], \mixFilter, voice[\mixFilter], \mixDrive, voice[\mixDrive]];
+				voice[\args].keysValuesDo({ |key, value| args = args ++ [key, value] });
+				Synth(voice[\synth], args);
+				meterLevels[i] = meterLevels[i].max(voice[\level].clip(0, 1));
+			};
+		});
+	};
+
+	triggerSynth = { |stepSeconds|
+		var anySolo;
+		anySolo = drumVoices.any({ |voice| voice[\solo] == 1 }) or: { (synthMixer[\solo] == 1) or: { sampleMixer[\solo] == 1 } };
+		if((synthMixer[\muted] == 0) and: { (anySolo.not or: { synthMixer[\solo] == 1 }) and: { synthGates[synthStep] == 1 } }) {
+			var dur, args;
+			dur = stepSeconds * synthParams[\gateLen].clip(0.05, 1.5) * if(synthSlides[synthStep] == 1) { 1.9 } { 0.9 };
+			args = [\out, masterBus, \fxDelay, delayBus, \fxRev, reverbBus, \freq, currentFreq.(synthNotes[synthStep]), \sustainTime, dur, \accent, synthAccents[synthStep], \mixFilter, synthMixer[\mixFilter], \mixDrive, synthMixer[\mixDrive]];
+			synthParams.keysValuesDo({ |key, value| args = args ++ [key, value] });
+			Synth(\comboSh101, args);
+			meterLevels[drumVoices.size] = meterLevels[drumVoices.size].max(synthParams[\level].clip(0, 1));
+		};
+	};
+
+	triggerSample = { |stepSeconds|
+		var anySolo;
+		anySolo = drumVoices.any({ |voice| voice[\solo] == 1 }) or: { (synthMixer[\solo] == 1) or: { sampleMixer[\solo] == 1 } };
+		if(sampleBuf.notNil and: { (sampleMixer[\muted] == 0) and: { anySolo.not or: { sampleMixer[\solo] == 1 } } }) {
+			Synth(\comboSampleSlice, [
+				\out, masterBus, \fxDelay, delayBus, \fxRev, reverbBus,
+				\buf, sampleBuf, \slice, sampleSlices[sampleStep],
+				\stepDur, stepSeconds,
+				\level, sampleParams[\level], \pan, sampleParams[\pan],
+				\sendDelay, sampleParams[\delaySend], \sendRev, sampleParams[\reverbSend],
+				\filterMode, sampleParams[\filterMode], \cutoff, sampleParams[\cutoff], \res, sampleParams[\res], \pitch, sampleParams[\pitch],
+				\mixFilter, sampleMixer[\mixFilter], \mixDrive, sampleMixer[\mixDrive]
+			]);
+			meterLevels[drumVoices.size + 1] = meterLevels[drumVoices.size + 1].max(sampleParams[\level].clip(0, 1));
+		};
+	};
+
+	startClock = {
+		task.notNil.if({ task.stop });
+		playing = true;
+		playButton.background_(colors[\green]);
+		stopButton.background_(colors[\panel2]);
+		task = Task({
+			loop {
+				var swingMul, waitBeats, drumSeconds, synthSeconds, sampleSeconds;
+				swingMul = if((clockTick % 4) == 2) { 1 + swing } { if((clockTick % 4) == 0) { 1 - swing } { 1 } };
+				waitBeats = (0.125 * swingMul).max(0.03);
+				drumSeconds = 60 / tempo * (0.125 * clockDivTicks[drumDivIndex]);
+				synthSeconds = 60 / tempo * (0.125 * clockDivTicks[synthDivIndex]);
+				sampleSeconds = 60 / tempo * (0.125 * clockDivTicks[sampleDivIndex]);
+				if(pendingPreset.notNil and: { (clockTick > 0) and: { (clockTick % (steps * 2)) == 0 } }) {
+					var state;
+					state = pendingPreset;
+					pendingPreset = nil;
+					applyPreset.(state);
+				};
+				if((clockTick % clockDivTicks[drumDivIndex]) == 0) {
+					triggerDrums.();
+					drumStep = if(drumStep >= drumLoopEnd) { drumLoopStart } { drumStep + 1 };
+				};
+				if((clockTick % clockDivTicks[synthDivIndex]) == 0) {
+					triggerSynth.(synthSeconds);
+					synthStep = if(synthStep >= synthLoopEnd) { synthLoopStart } { synthStep + 1 };
+				};
+				if((clockTick % clockDivTicks[sampleDivIndex]) == 0) {
+					triggerSample.(sampleSeconds);
+					sampleStep = (sampleStep + 1) % steps;
+				};
+				{ redrawAll.() }.defer;
+				waitBeats.wait;
+				clockTick = clockTick + 1;
+				step = (step + 1) % (steps * 2);
+			}
+		}, clock).play;
+	};
+
+	stopClock = {
+		task.notNil.if({ task.stop });
+		playing = false;
+		step = 0;
+		clockTick = 0;
+		drumStep = drumLoopStart;
+		synthStep = synthLoopStart;
+		sampleStep = 0;
+		playButton.background_(colors[\panel2]);
+		stopButton.background_(colors[\red]);
+		redrawAll.();
+	};
+
+	makePreset = { |name|
+		(
+			version: 1,
+			name: name,
+			tempo: tempo,
+			swing: swing,
+			masterAmp: masterAmp,
+			baseMidi: baseMidi,
+			synthKeyRoot: synthKeyRoot,
+			synthScaleIndex: synthScaleIndex,
+			drumDivIndex: drumDivIndex,
+			synthDivIndex: synthDivIndex,
+			sampleDivIndex: sampleDivIndex,
+			delaySyncEnabled: delaySyncEnabled,
+			delaySyncIndex: delaySyncIndex,
+			drumLoopStart: drumLoopStart,
+			drumLoopEnd: drumLoopEnd,
+			synthLoopStart: synthLoopStart,
+			synthLoopEnd: synthLoopEnd,
+			selectedDrumVoice: selectedDrumVoice,
+			drums: drumVoices.collect({ |voice|
+				(
+					name: voice[\name],
+					pattern: voice[\pattern].as(Array).copy,
+					level: voice[\level],
+					pan: voice[\pan],
+					delay: voice[\delay],
+					reverb: voice[\reverb],
+					muted: voice[\muted],
+					solo: voice[\solo],
+					mixFilter: voice[\mixFilter],
+					mixDrive: voice[\mixDrive],
+					args: voice[\args].copy
+				)
+			}),
+			synthNotes: synthNotes.copy,
+			synthGates: synthGates.copy,
+			synthAccents: synthAccents.copy,
+			synthSlides: synthSlides.copy,
+			synthParams: synthParams.copy,
+			synthMixer: synthMixer.copy,
+			samplePath: samplePath,
+			sampleSlices: sampleSlices.copy,
+			sampleParams: sampleParams.copy,
+			sampleMixer: sampleMixer.copy,
+			fxParams: fxParams.copy,
+			masterCompParams: masterCompParams.copy
+		)
+	};
+
+	refreshPresetMenu = {
+		presetNames = presets.keys.asArray.sort;
+		if(presetMenu.notNil) {
+			presetMenu.items_(["PRESETS"] ++ presetNames);
+			presetMenu.value_(0);
+		};
+	};
+
+	loadPresets = {
+		var text, loaded;
+		if(File.exists(presetPath)) {
+			text = File.readAllString(presetPath);
+			if(text.notNil and: { text.size > 0 }) {
+				loaded = try { text.interpret } { Dictionary.new };
+				if(loaded.isKindOf(Dictionary)) {
+					presets = loaded;
+				};
+			};
+		};
+		refreshPresetMenu.();
+	};
+
+	savePreset = {
+		var name;
+		name = presetNameField.string;
+		if(name.size < 1) { name = "Preset " ++ presets.size.asString };
+		presets.put(name, makePreset.(name));
+		File.use(presetPath, "w", { |file| file.write(presets.asCompileString) });
+		presetNameField.string_(name);
+		refreshPresetMenu.();
+	};
+
+	exportPresets = {
+		Dialog.savePanel({ |path|
+			if(path.notNil) {
+				File.use(path, "w", { |file| file.write(presets.asCompileString) });
+			};
+		});
+	};
+
+	importPresets = {
+		Dialog.openPanel({ |path|
+			var text, loaded;
+			if(path.notNil) {
+				text = File.readAllString(path);
+				loaded = try { text.interpret } { nil };
+				if(loaded.isKindOf(Dictionary)) {
+					presets = loaded;
+					File.use(presetPath, "w", { |file| file.write(presets.asCompileString) });
+					refreshPresetMenu.();
+				};
+			};
+		});
+	};
+
+	exportMidiMappings = {
+		Dialog.savePanel({ |path|
+			if(path.notNil) {
+				File.use(path, "w", { |file|
+					file.write(Dictionary.newFrom([\cc, midiMappings, \note, midiNoteMappings]).asCompileString)
+				});
+			};
+		});
+	};
+
+	importMidiMappings = {
+		Dialog.openPanel({ |path|
+			var text, loaded;
+			if(path.notNil) {
+				text = File.readAllString(path);
+				loaded = try { text.interpret } { nil };
+				if(loaded.isKindOf(Dictionary)) {
+					if(loaded[\cc].notNil) {
+						midiMappings = loaded[\cc];
+						midiNoteMappings = loaded[\note] ? Dictionary.new;
+					} {
+						midiMappings = loaded;
+						midiNoteMappings = Dictionary.new;
+					};
+					saveMidiMappings.();
+				};
+			};
+		});
+	};
+
+	refreshMachineGui = {
+		if(tempoBox.notNil) { tempoBox.value_(tempo) };
+		if(swingSlider.notNil) { swingSlider.value_(swing.linlin(0, 0.35, 0, 1).clip(0, 1)) };
+		if(masterVolumeControl.notNil) {
+			masterVolumeControl[\slider].value_(masterAmp.clip(0, 1));
+			masterVolumeControl[\box].value_(masterAmp.round(0.01));
+		};
+		if(rootBox.notNil) { rootBox.value_((baseMidi.clip(24, 72) - 24).asInteger) };
+		if(synthKeyMenu.notNil) { synthKeyMenu.value_(synthKeyRoot) };
+		if(synthScaleMenu.notNil) { synthScaleMenu.value_(synthScaleIndex) };
+		if(drumDivMenu.notNil) { drumDivMenu.value_(drumDivIndex) };
+		if(synthDivMenu.notNil) { synthDivMenu.value_(synthDivIndex) };
+		if(sampleDivMenu.notNil) { sampleDivMenu.value_(sampleDivIndex) };
+		if(delaySyncButton.notNil) { delaySyncButton.value_(delaySyncEnabled.asInteger) };
+		if(delaySyncMenu.notNil) { delaySyncMenu.value_(delaySyncIndex.clip(0, delaySyncNames.size - 1)) };
+		if(drumStartBox.notNil) { drumStartBox.value_(drumLoopStart + 1) };
+		if(drumEndBox.notNil) { drumEndBox.value_(drumLoopEnd + 1) };
+		if(drumLenBox.notNil) { drumLenBox.value_(drumLoopEnd - drumLoopStart + 1) };
+		if(synthStartBox.notNil) { synthStartBox.value_(synthLoopStart + 1) };
+		if(synthEndBox.notNil) { synthEndBox.value_(synthLoopEnd + 1) };
+		if(synthLenBox.notNil) { synthLenBox.value_(synthLoopEnd - synthLoopStart + 1) };
+		if(sampleSliceSliders.notNil) {
+			sampleSliceSliders.do({ |slider, i|
+				slider.value_(sampleSlices[i].linlin(0, 15, 0, 1));
+				sampleSliceLabels[i].string_((sampleSlices[i] + 1).asString);
+			});
+		};
+		if(sampleFilterMenu.notNil) { sampleFilterMenu.value_(sampleParams[\filterMode].asInteger.clip(0, 2)) };
+		if(sampleParamControls.notNil) {
+			sampleParamControls.do({ |control, i|
+				var key, spec, value;
+				key = sampleParamOrder[i];
+				spec = sampleParamSpec[key];
+				value = sampleParams[key].linlin(spec[0], spec[1], 0, 1).clip(0, 1);
+				control[\slider].value_(value);
+				control[\box].value_(value.round(0.01));
+			});
+		};
+		if(drumMuteButtons.notNil) {
+			drumMuteButtons.do({ |button, i| button.value_(drumVoices[i][\muted].asInteger) });
+		};
+		if(drumLevelSliders.notNil) {
+			drumLevelSliders.do({ |slider, i| slider.value_(drumVoices[i][\level].clip(0, 1)) });
+		};
+		if(synthParamControls.notNil) {
+			synthParamControls.do({ |control, i|
+				var key, value;
+				key = synthParamOrder[i];
+				value = synthParams[key].clip(0, 1);
+				control[\slider].value_(value);
+				control[\box].value_(value.round(0.01));
+			});
+		};
+		if(synthEnvControls.notNil) {
+			synthEnvControls.do({ |control, i|
+				var key, spec, value;
+				key = synthEnvOrder[i];
+				spec = synthEnvSpec[key];
+				value = synthParams[key].linlin(spec[0], spec[1], 0, 1).clip(0, 1);
+				control[\slider].value_(value);
+				control[\box].value_(value.round(0.01));
+			});
+		};
+		if(synthLfoShapeMenu.notNil) { synthLfoShapeMenu.value_(synthParams[\lfoShape].asInteger.clip(0, synthLfoShapeNames.size - 1)) };
+		if(synthLfoDestMenu.notNil) { synthLfoDestMenu.value_(synthParams[\lfoDest].asInteger.clip(0, synthLfoDestNames.size - 1)) };
+		if(synthLfoControls.notNil) {
+			synthLfoControls.do({ |control, i|
+				var key, spec, value;
+				key = synthLfoOrder[i];
+				spec = synthLfoSpec[key];
+				value = synthParams[key].linlin(spec[0], spec[1], 0, 1).clip(0, 1);
+				control[\slider].value_(value);
+				control[\box].value_(value.round(0.01));
+			});
+		};
+		if(fxParamControls.notNil) {
+			fxParamControls.do({ |control, i|
+				var key, spec, value;
+				key = fxParamOrder[i];
+				spec = fxParamSpec[key];
+				value = fxParams[key].linlin(spec[0], spec[1], 0, 1).clip(0, 1);
+				control[\slider].value_(value);
+				control[\box].value_(value.round(0.01));
+			});
+		};
+		if(masterCompControls.notNil) {
+			masterCompControls.do({ |control, i|
+				var key, value;
+				key = masterCompOrder[i];
+				value = masterCompParams[key].clip(0, 1);
+				control[\slider].value_(value);
+				control[\box].value_(value.round(0.01));
+			});
+		};
+		if(refreshMixerGui.notNil) { refreshMixerGui.() };
+		if(updateDrumEditor.notNil) { updateDrumEditor.() };
+		redrawAll.();
+	};
+
+	applyPreset = { |state|
+		if(state.notNil) {
+			tempo = state[\tempo] ? tempo;
+			swing = state[\swing] ? swing;
+			masterAmp = (state[\masterAmp] ? masterAmp).clip(0, 1);
+			baseMidi = (state[\baseMidi] ? baseMidi).clip(24, 72).asInteger;
+			synthKeyRoot = (state[\synthKeyRoot] ? synthKeyRoot).clip(0, 11).asInteger;
+			synthScaleIndex = (state[\synthScaleIndex] ? synthScaleIndex).clip(0, synthScaleNames.size - 1).asInteger;
+			drumDivIndex = (state[\drumDivIndex] ? drumDivIndex).clip(0, clockDivNames.size - 1).asInteger;
+			synthDivIndex = (state[\synthDivIndex] ? synthDivIndex).clip(0, clockDivNames.size - 1).asInteger;
+			sampleDivIndex = (state[\sampleDivIndex] ? sampleDivIndex).clip(0, clockDivNames.size - 1).asInteger;
+			delaySyncEnabled = (state[\delaySyncEnabled] ? delaySyncEnabled).clip(0, 1).asInteger;
+			delaySyncIndex = (state[\delaySyncIndex] ? delaySyncIndex).clip(0, delaySyncNames.size - 1).asInteger;
+			drumLoopStart = (state[\drumLoopStart] ? drumLoopStart).clip(0, steps - 1).asInteger;
+			drumLoopEnd = (state[\drumLoopEnd] ? drumLoopEnd).clip(drumLoopStart, steps - 1).asInteger;
+			synthLoopStart = (state[\synthLoopStart] ? synthLoopStart).clip(0, steps - 1).asInteger;
+			synthLoopEnd = (state[\synthLoopEnd] ? synthLoopEnd).clip(synthLoopStart, steps - 1).asInteger;
+			clockTick = 0;
+			drumStep = drumLoopStart;
+			synthStep = synthLoopStart;
+			sampleStep = 0;
+			selectedDrumVoice = state[\selectedDrumVoice] ? selectedDrumVoice;
+			selectedDrumVoice = selectedDrumVoice.clip(0, drumVoices.size - 1).asInteger;
+			if(state[\name].notNil) {
+				{ if(presetNameField.notNil) { presetNameField.string_(state[\name]) } }.defer;
+			};
+			if(state[\drums].notNil) {
+				state[\drums].do({ |saved, i|
+					if(i < drumVoices.size) {
+						drumVoices[i][\pattern] = saved[\pattern].as(Array).copy;
+						drumVoices[i][\level] = saved[\level] ? drumVoices[i][\level];
+						drumVoices[i][\pan] = saved[\pan] ? drumVoices[i][\pan];
+						drumVoices[i][\delay] = saved[\delay] ? drumVoices[i][\delay];
+						drumVoices[i][\reverb] = saved[\reverb] ? drumVoices[i][\reverb];
+						drumVoices[i][\muted] = saved[\muted] ? drumVoices[i][\muted];
+						drumVoices[i][\solo] = saved[\solo] ? (drumVoices[i][\solo] ? 0);
+						drumVoices[i][\mixFilter] = saved[\mixFilter] ? (drumVoices[i][\mixFilter] ? 0.5);
+						drumVoices[i][\mixDrive] = saved[\mixDrive] ? (drumVoices[i][\mixDrive] ? 0);
+						if(saved[\args].notNil) { drumVoices[i][\args] = saved[\args].copy };
+						if(drumVoices[i][\name] == "CP" and: { drumVoices[i][\args][\spread].isNil }) {
+							drumVoices[i][\args].put(\spread, 0.35);
+						};
+					};
+				});
+			};
+			if(state[\synthNotes].notNil) { synthNotes = state[\synthNotes].copy };
+			if(state[\synthGates].notNil) { synthGates = state[\synthGates].copy };
+			if(state[\synthAccents].notNil) { synthAccents = state[\synthAccents].copy };
+			if(state[\synthSlides].notNil) { synthSlides = state[\synthSlides].copy };
+			if(state[\samplePath].notNil and: { state[\samplePath].size > 0 }) {
+				if(File.exists(state[\samplePath])) {
+					sampleBuf.notNil.if({ sampleBuf.free });
+					samplePath = state[\samplePath];
+					sampleBuf = Buffer.read(s, samplePath);
+					{ if(sampleNameLabel.notNil) { sampleNameLabel.string_(PathName(samplePath).fileName) } }.defer;
+				};
+			};
+			if(state[\sampleSlices].notNil) { sampleSlices = state[\sampleSlices].copy };
+			if(state[\sampleParams].notNil) {
+				state[\sampleParams].keysValuesDo({ |key, value|
+					if(sampleParams.keys.includes(key)) { sampleParams.put(key, value) };
+				});
+				if(state[\sampleParams].keys.includes(\pitch).not) { sampleParams.put(\pitch, 1) };
+			};
+			if(state[\sampleMixer].notNil) {
+				state[\sampleMixer].keysValuesDo({ |key, value|
+					if(sampleMixer.keys.includes(key)) { sampleMixer.put(key, value) };
+				});
+			};
+			if(state[\synthParams].notNil) {
+				state[\synthParams].keysValuesDo({ |key, value|
+					if(synthParams.keys.includes(key)) { synthParams.put(key, value) };
+				});
+			};
+			if(state[\synthMixer].notNil) {
+				state[\synthMixer].keysValuesDo({ |key, value|
+					if(synthMixer.keys.includes(key)) { synthMixer.put(key, value) };
+				});
+			};
+			if(synthParams[\wave].isNil) { synthParams.put(\wave, 0.5) };
+			if(synthParams[\pw].isNil) { synthParams.put(\pw, 0.48) };
+			if(synthParams[\lfoShape].isNil) { synthParams.put(\lfoShape, 0) };
+			if(synthParams[\lfoDest].isNil) { synthParams.put(\lfoDest, 2) };
+			if(synthParams[\lfoAmount].isNil) { synthParams.put(\lfoAmount, 0.08) };
+			if(state[\fxParams].notNil) {
+				state[\fxParams].keysValuesDo({ |key, value|
+					if(fxParams.keys.includes(key)) { fxParams.put(key, value) };
+				});
+			};
+			if(state[\masterCompParams].notNil) {
+				state[\masterCompParams].keysValuesDo({ |key, value|
+					if(masterCompParams.keys.includes(key)) { masterCompParams.put(key, value) };
+				});
+			};
+			clock.tempo = tempo / 60;
+			masterSynth.set(\amp, masterAmp);
+			updateDelaySync.();
+			delaySynth.set(\time, fxParams[\delayTime], \feedback, fxParams[\delayFeedback], \wow, fxParams[\delayWow], \tone, fxParams[\delayTone], \wet, fxParams[\delayWet]);
+			reverbSynth.set(\room, fxParams[\reverbRoom], \damp, fxParams[\reverbDamp], \wet, fxParams[\reverbWet], \shimmer, fxParams[\reverbShimmer]);
+			masterSynth.set(\threshold, masterCompParams[\threshold], \ratio, masterCompParams[\ratio], \attack, masterCompParams[\attack], \release, masterCompParams[\release], \makeup, masterCompParams[\makeup], \drive, masterCompParams[\drive]);
+			{ refreshMachineGui.() }.defer;
+		};
+	};
+
+	queuePreset = { |state|
+		if(playing) {
+			pendingPreset = state;
+		} {
+			applyPreset.(state);
+		};
+	};
+
+	selectPresetOffset = { |offset|
+		var current, next;
+		if(presetNames.size > 0) {
+			current = if(presetMenu.notNil and: { presetMenu.value > 0 }) { presetMenu.value - 1 } { 0 };
+			next = (current + offset).wrap(0, presetNames.size - 1);
+			if(presetMenu.notNil) { presetMenu.value_(next + 1) };
+			queuePreset.(presets[presetNames[next]]);
+		};
+	};
+
+	randomizeDrums = { |doRefresh=true|
+		drumDivIndex = [0, 1, 1, 2].choose;
+		drumLoopStart = 0;
+		drumLoopEnd = [7, 11, 15].choose;
+		drumStep = drumLoopStart;
+		drumVoices.do({ |voice, i|
+			var density;
+			density = [0.24, 0.18, 0.12, 0.55, 0.16, 0.12, 0.14][i];
+			voice[\pattern] = Array.fill(steps, { if(1.0.rand < density) { 1 } { 0 } });
+		});
+		drumVoices[0][\pattern][0] = 1;
+		drumVoices[1][\pattern][4] = 1;
+		drumVoices[1][\pattern][12] = 1;
+		if(doRefresh) { refreshMachineGui.() };
+	};
+
+	randomizeSynth = { |doRefresh=true|
+		var noteChoices;
+		noteChoices = [-12, -7, -5, 0, 3, 5, 7, 10, 12, 15, 19, 24];
+		baseMidi = [33, 36, 38, 40, 43, 45].choose;
+		synthKeyRoot = 12.rand;
+		synthScaleIndex = synthScaleNames.size.rand;
+		synthDivIndex = [0, 1, 1, 2, 3].choose;
+		synthLoopStart = 0;
+		synthLoopEnd = [7, 11, 15].choose;
+		synthStep = synthLoopStart;
+		synthNotes = Array.fill(steps, { noteChoices.choose });
+		synthGates = Array.fill(steps, { if(1.0.rand < 0.62) { 1 } { 0 } });
+		synthAccents = Array.fill(steps, { if(1.0.rand < 0.24) { 1 } { 0 } });
+		synthSlides = Array.fill(steps, { if(1.0.rand < 0.18) { 1 } { 0 } });
+		if(doRefresh) { refreshMachineGui.() };
+	};
+
+	randomizeWav = { |doRefresh=true|
+		sampleDivIndex = [1, 2, 3].choose;
+		sampleStep = 0;
+		sampleSlices = Array.fill(steps, { 16.rand });
+		if(doRefresh) { refreshMachineGui.() };
+	};
+
+	randomizeAll = {
+		clockTick = 0;
+		randomizeDrums.(false);
+		randomizeSynth.(false);
+		randomizeWav.(false);
+		refreshMachineGui.();
+	};
+
+	handleSpaceKey = { |view, char, modifiers, unicode, keycode|
+		if((unicode == 32) or: { keycode == 49 }) {
+			if(playing) { stopClock.() } { startClock.() };
+			true;
+		} {
+			false;
+		};
+	};
+
+	loadPresets.();
+
+	win = Window("Combined 808/606 + SH-101 Groovebox", Rect(40, 20, 1520, 1170)).background_(colors[\bg]).front;
+	root = CompositeView(win, win.view.bounds.insetBy(12, 12)).background_(colors[\bg]).resize_(5);
+
+	transportView = CompositeView(root, Rect(0, 0, 1216, 74)).background_(colors[\panel]).resize_(2);
+	StaticText(transportView, Rect(16, 12, 300, 30)).string_("808/606 + SH-101").font_(Font("Helvetica", 22).boldVariant).stringColor_(colors[\text]).background_(Color.clear);
+	playButton = Button(transportView, Rect(326, 18, 70, 40)).states_([["PLAY", colors[\text], colors[\panel2]]]).font_(font.boldVariant).action_({ if(playing.not) { startClock.() } });
+	stopButton = Button(transportView, Rect(402, 18, 70, 40)).states_([["STOP", colors[\text], colors[\red]]]).font_(font.boldVariant).action_({ stopClock.() });
+	win.view.keyDownAction_(handleSpaceKey);
+	makeLabel.(transportView, Rect(488, 10, 60, 14), "TEMPO", colors[\muted]);
+	tempoBox = NumberBox(transportView, Rect(488, 30, 60, 28)).value_(tempo).clipLo_(40).clipHi_(220).font_(font).background_(colors[\panel2]).stringColor_(colors[\text]).normalColor_(colors[\text]).typingColor_(colors[\text]).action_({ |box| tempo = box.value.clip(40, 220); clock.tempo = tempo / 60; updateDelaySync.(); refreshMachineGui.() });
+	makeLabel.(transportView, Rect(560, 10, 96, 14), "SWING", colors[\muted]);
+	swingSlider = Slider(transportView, Rect(560, 34, 96, 20)).value_(swing.linlin(0, 0.35, 0, 1)).background_(colors[\panel2]).knobColor_(colors[\yellow]).action_({ |sl| swing = sl.value.linlin(0, 1, 0, 0.35) });
+	makeLabel.(transportView, Rect(670, 10, 70, 14), "ROOT", colors[\muted]);
+	rootBox = PopUpMenu(transportView, Rect(670, 30, 70, 28)).items_(rootNoteNames).value_((baseMidi.clip(24, 72) - 24).asInteger).font_(font).background_(colors[\panel2]).stringColor_(colors[\text]).action_({ |menu|
+		baseMidi = menu.value.asInteger + 24;
+	});
+	makeLabel.(transportView, Rect(760, 10, 118, 14), "PRESET NAME", colors[\muted]);
+	presetNameField = TextField(transportView, Rect(760, 30, 118, 28)).string_("Init").font_(smallFont).background_(colors[\panel2]).stringColor_(colors[\text]);
+	Button(transportView, Rect(886, 30, 58, 28)).states_([["SAVE", colors[\bg], colors[\green]]]).font_(smallFont.boldVariant).action_({ savePreset.() });
+	makeLabel.(transportView, Rect(952, 10, 126, 14), "RECALL", colors[\muted]);
+	presetMenu = PopUpMenu(transportView, Rect(952, 30, 126, 28)).items_(["PRESETS"]).font_(smallFont).background_(colors[\panel2]).stringColor_(colors[\text]).action_({ |menu|
+		if(menu.value > 0) {
+			queuePreset.(presets[presetNames[menu.value - 1]]);
+		};
+	});
+	makeLabel.(transportView, Rect(1080, 10, 120, 14), "RANDOM", colors[\muted]);
+	randomDrumButton = Button(transportView, Rect(1080, 30, 28, 28)).states_([["DRM", colors[\bg], colors[\yellow]]]).font_(smallFont.boldVariant).action_({ randomizeDrums.() });
+	randomSynthButton = Button(transportView, Rect(1112, 30, 28, 28)).states_([["SYN", colors[\bg], colors[\yellow]]]).font_(smallFont.boldVariant).action_({ randomizeSynth.() });
+	randomWavButton = Button(transportView, Rect(1144, 30, 28, 28)).states_([["WAV", colors[\bg], colors[\yellow]]]).font_(smallFont.boldVariant).action_({ randomizeWav.() });
+	randomAllButton = Button(transportView, Rect(1176, 30, 28, 28)).states_([["ALL", colors[\bg], colors[\yellow]]]).font_(smallFont.boldVariant).action_({ randomizeAll.() });
+	refreshPresetMenu.();
+
+	drumView = CompositeView(root, Rect(0, 88, 1216, 404)).background_(colors[\panel]).resize_(2);
+	makeLabel.(drumView, Rect(12, 8, 1192, 18), "808 / 606 DRUM MACHINE", colors[\yellow]);
+	makeLabel.(drumView, Rect(676, 8, 36, 14), "DIV", colors[\muted]);
+	drumDivMenu = PopUpMenu(drumView, Rect(716, 4, 72, 22)).items_(clockDivNames).value_(drumDivIndex).font_(smallFont).background_(colors[\panel2]).stringColor_(colors[\text]).action_({ |menu|
+		drumDivIndex = menu.value.asInteger;
+		drumStep = drumLoopStart;
+		clockTick = 0;
+	});
+	makeLabel.(drumView, Rect(806, 8, 44, 14), "LEN", colors[\muted]);
+	drumLenBox = NumberBox(drumView, Rect(850, 4, 44, 22)).value_(16).clipLo_(1).clipHi_(16).font_(smallFont).background_(colors[\panel2]).stringColor_(colors[\text]).normalColor_(colors[\text]).typingColor_(colors[\text]).action_({ |box|
+		var len;
+		len = box.value.clip(1, steps).asInteger;
+		drumLoopEnd = (drumLoopStart + len - 1).clip(drumLoopStart, steps - 1);
+		drumStep = drumLoopStart;
+		refreshMachineGui.();
+	});
+	makeLabel.(drumView, Rect(902, 8, 54, 14), "START", colors[\muted]);
+	drumStartBox = NumberBox(drumView, Rect(958, 4, 44, 22)).value_(1).clipLo_(1).clipHi_(16).font_(smallFont).background_(colors[\panel2]).stringColor_(colors[\text]).normalColor_(colors[\text]).typingColor_(colors[\text]).action_({ |box|
+		drumLoopStart = (box.value.clip(1, steps).asInteger - 1).clip(0, steps - 1);
+		if(drumLoopEnd < drumLoopStart) { drumLoopEnd = drumLoopStart };
+		drumStep = drumLoopStart;
+		refreshMachineGui.();
+	});
+	makeLabel.(drumView, Rect(1010, 8, 44, 14), "END", colors[\muted]);
+	drumEndBox = NumberBox(drumView, Rect(1054, 4, 44, 22)).value_(16).clipLo_(1).clipHi_(16).font_(smallFont).background_(colors[\panel2]).stringColor_(colors[\text]).normalColor_(colors[\text]).typingColor_(colors[\text]).action_({ |box|
+		drumLoopEnd = (box.value.clip(1, steps).asInteger - 1).clip(drumLoopStart, steps - 1);
+		drumStep = drumLoopStart;
+		refreshMachineGui.();
+	});
+	drumButtons = Array.fill(drumVoices.size, { |vi|
+		var y = 36 + (vi * 34);
+		makeLabel.(drumView, Rect(12, y + 6, 38, 16), drumVoices[vi][\name], colors[\text]);
+		drumMuteButtons = drumMuteButtons ?? { Array.newClear(drumVoices.size) };
+		drumMuteButtons[vi] = Button(drumView, Rect(54, y + 3, 44, 24)).states_([["ON", colors[\bg], colors[\green]], ["MUTE", colors[\text], colors[\off]]]).font_(smallFont.boldVariant).action_({ |b| drumVoices[vi][\muted] = b.value.asInteger });
+		drumLevelSliders = drumLevelSliders ?? { Array.newClear(drumVoices.size) };
+		drumLevelSliders[vi] = Slider(drumView, Rect(104, y + 7, 90, 16)).value_(drumVoices[vi][\level]).background_(colors[\panel2]).knobColor_(colors[\orange]).action_({ |sl| drumVoices[vi][\level] = sl.value });
+		drumClearButtons = drumClearButtons ?? { Array.newClear(drumVoices.size) };
+		if(vi == 0) { makeLabel.(drumView, Rect(1138, 22, 54, 12), "CLEAR", colors[\muted]) };
+		drumClearButtons[vi] = Button(drumView, Rect(1138, y, 54, 26))
+			.states_([["CLR", colors[\text], colors[\off]]])
+			.font_(smallFont.boldVariant)
+			.action_({
+				selectedDrumVoice = vi;
+				drumVoices[vi][\pattern] = Array.fill(steps, 0);
+				if(updateDrumEditor.notNil) { updateDrumEditor.() };
+				redrawAll.();
+			});
+		Array.fill(steps, { |si|
+			var x = 212 + (si * 58);
+			if(vi == 0 and: { (si % 4) == 0 }) { makeLabel.(drumView, Rect(x, 22, 36, 12), (si + 1).asString, colors[\muted]) };
+			Button(drumView, Rect(x, y, 42, 26))
+				.states_([["OFF", colors[\muted], colors[\off]], ["ON", colors[\bg], colors[\red]]])
+				.font_(smallFont.boldVariant)
+				.action_({ |button|
+				var pat;
+				selectedDrumVoice = vi;
+				pat = drumVoices[vi][\pattern].copy;
+				pat[si] = button.value.asInteger;
+				drumVoices[vi][\pattern] = pat;
+				if(updateDrumEditor.notNil) { updateDrumEditor.() };
+				button.states_([
+					["OFF", colors[\muted], if(si == drumStep) { colors[\yellow] } { colors[\off] }],
+					["ON", colors[\bg], if(si == drumStep) { colors[\yellow] } { colors[\red] }]
+				]);
+				button.value_(pat[si]);
+				redrawAll.();
+			});
+		});
+	});
+
+	drumEditView = CompositeView(drumView, Rect(12, 268, 1192, 74)).background_(colors[\panel2]);
+	makeLabel.(drumEditView, Rect(8, 6, 160, 14), "DRUM VOICE EDIT", colors[\yellow]);
+	drumVoiceButtons = Array.fill(drumVoices.size, { |i|
+		Button(drumEditView, Rect(8 + (i * 44), 30, 38, 28))
+			.states_([
+				[drumVoices[i][\name], colors[\text], colors[\off]],
+				[drumVoices[i][\name], colors[\bg], colors[\yellow]]
+			])
+			.font_(smallFont.boldVariant)
+			.action_({
+				selectedDrumVoice = i;
+				updateDrumEditor.();
+				redrawAll.();
+			});
+	});
+	drumParamKeys = Array.newClear(8);
+	drumParamSpecs = Array.newClear(8);
+	drumParamRows = Array.fill(8, { |i|
+		makeHParam.(drumEditView, Rect(332 + ((i % 4) * 212), 8 + (((i / 4).floor) * 34), 196, 26), "", 0, { |val|
+			var key, spec, mapped, args;
+			key = drumParamKeys[i];
+			spec = drumParamSpecs[i];
+			if(key.notNil and: { spec.notNil }) {
+				registerMidiLearn.([\drumParam, selectedDrumVoice, key]);
+				mapped = val.linlin(0, 1, spec[0], spec[1]);
+				if(key == \delay) {
+					drumVoices[selectedDrumVoice][\delay] = mapped;
+				} {
+					if(key == \reverb) {
+						drumVoices[selectedDrumVoice][\reverb] = mapped;
+					} {
+						if(key == \pan) {
+							drumVoices[selectedDrumVoice][\pan] = mapped;
+						} {
+							args = drumVoices[selectedDrumVoice][\args].copy;
+							args.put(key, mapped);
+							drumVoices[selectedDrumVoice][\args] = args;
+						};
+					};
+				};
+			};
+		}, colors[\green]);
+	});
+
+	updateDrumEditor = {
+		var voice, keys;
+		voice = drumVoices[selectedDrumVoice];
+		keys = drumParamOrder.select({ |key|
+			((key == \delay) or: { key == \reverb }) or: { (key == \pan) or: { voice[\args].keys.includes(key) } }
+		});
+		drumParamRows.do({ |row, i|
+			var key, spec, raw, norm;
+			key = keys[i];
+			if(key.isNil) {
+				drumParamKeys[i] = nil;
+				drumParamSpecs[i] = nil;
+				row[\row].visible_(false);
+			} {
+				spec = drumParamSpec.(voice, key);
+				raw = if(key == \delay) {
+					voice[\delay];
+				} {
+					if(key == \reverb) {
+						voice[\reverb];
+					} {
+						if(key == \pan) { voice[\pan] } { voice[\args][key] };
+					};
+				};
+				norm = raw.linlin(spec[0], spec[1], 0, 1).clip(0, 1);
+				drumParamKeys[i] = key;
+				drumParamSpecs[i] = spec;
+				row[\name].string_(drumParamLabel.(key));
+				row[\slider].value_(norm);
+				row[\box].value_(norm.round(0.01));
+				row[\row].visible_(true);
+			};
+		});
+	};
+	updateDrumEditor.();
+
+	synthSeqView = CompositeView(root, Rect(0, 450, 1216, 190)).background_(colors[\panel]).resize_(2);
+	makeLabel.(synthSeqView, Rect(12, 8, 280, 18), "SH-101 16 STEP SEQUENCER", colors[\yellow]);
+	makeLabel.(synthSeqView, Rect(318, 8, 36, 14), "KEY", colors[\muted]);
+	synthKeyMenu = PopUpMenu(synthSeqView, Rect(356, 4, 62, 22)).items_(synthKeyNames).value_(synthKeyRoot).font_(smallFont).background_(colors[\panel2]).stringColor_(colors[\text]).action_({ |menu|
+		synthKeyRoot = menu.value.asInteger;
+	});
+	makeLabel.(synthSeqView, Rect(426, 8, 48, 14), "SCALE", colors[\muted]);
+	synthScaleMenu = PopUpMenu(synthSeqView, Rect(476, 4, 132, 22)).items_(synthScaleNames).value_(synthScaleIndex).font_(smallFont).background_(colors[\panel2]).stringColor_(colors[\text]).action_({ |menu|
+		synthScaleIndex = menu.value.asInteger;
+	});
+	makeLabel.(synthSeqView, Rect(626, 8, 36, 14), "DIV", colors[\muted]);
+	synthDivMenu = PopUpMenu(synthSeqView, Rect(666, 4, 72, 22)).items_(clockDivNames).value_(synthDivIndex).font_(smallFont).background_(colors[\panel2]).stringColor_(colors[\text]).action_({ |menu|
+		synthDivIndex = menu.value.asInteger;
+		synthStep = synthLoopStart;
+		clockTick = 0;
+	});
+	makeLabel.(synthSeqView, Rect(806, 8, 44, 14), "LEN", colors[\muted]);
+	synthLenBox = NumberBox(synthSeqView, Rect(850, 4, 44, 22)).value_(16).clipLo_(1).clipHi_(16).font_(smallFont).background_(colors[\panel2]).stringColor_(colors[\text]).normalColor_(colors[\text]).typingColor_(colors[\text]).action_({ |box|
+		var len;
+		len = box.value.clip(1, steps).asInteger;
+		synthLoopEnd = (synthLoopStart + len - 1).clip(synthLoopStart, steps - 1);
+		synthStep = synthLoopStart;
+		refreshMachineGui.();
+	});
+	makeLabel.(synthSeqView, Rect(902, 8, 54, 14), "START", colors[\muted]);
+	synthStartBox = NumberBox(synthSeqView, Rect(958, 4, 44, 22)).value_(1).clipLo_(1).clipHi_(16).font_(smallFont).background_(colors[\panel2]).stringColor_(colors[\text]).normalColor_(colors[\text]).typingColor_(colors[\text]).action_({ |box|
+		synthLoopStart = (box.value.clip(1, steps).asInteger - 1).clip(0, steps - 1);
+		if(synthLoopEnd < synthLoopStart) { synthLoopEnd = synthLoopStart };
+		synthStep = synthLoopStart;
+		refreshMachineGui.();
+	});
+	makeLabel.(synthSeqView, Rect(1010, 8, 44, 14), "END", colors[\muted]);
+	synthEndBox = NumberBox(synthSeqView, Rect(1054, 4, 44, 22)).value_(16).clipLo_(1).clipHi_(16).font_(smallFont).background_(colors[\panel2]).stringColor_(colors[\text]).normalColor_(colors[\text]).typingColor_(colors[\text]).action_({ |box|
+		synthLoopEnd = (box.value.clip(1, steps).asInteger - 1).clip(synthLoopStart, steps - 1);
+		synthStep = synthLoopStart;
+		refreshMachineGui.();
+	});
+	synthStepViews = Array.fill(steps, { |i|
+		var x = 12 + (i * 74);
+		var view = CompositeView(synthSeqView, Rect(x, 34, 62, 144)).background_(colors[\panel2]);
+		makeLabel.(view, Rect(4, 4, 54, 12), (i + 1).asString, colors[\muted]);
+		view;
+	});
+	synthGateButtons = Array.fill(steps, { |i|
+		Button(synthStepViews[i], Rect(7, 20, 48, 22)).states_([["OFF", colors[\muted], colors[\off]], ["ON", colors[\bg], colors[\green]]]).font_(smallFont.boldVariant).action_({
+			synthGates[i] = 1 - synthGates[i];
+			redrawAll.();
+		});
+	});
+	synthNoteSliders = Array.fill(steps, { |i|
+		Slider(synthStepViews[i], Rect(7, 46, 48, 44)).orientation_(\vertical).value_(synthNotes[i].linlin(-24, 36, 0, 1).clip(0, 1)).background_(colors[\panel]).knobColor_(colors[\green]).action_({ |sl|
+			synthNotes[i] = sl.value.linlin(0, 1, -24, 36).round(1).asInteger;
+			if(synthNoteLabels.notNil) { synthNoteLabels[i].string_(synthNotes[i].asString) };
+		});
+	});
+	synthNoteLabels = Array.fill(steps, { |i|
+		StaticText(synthStepViews[i], Rect(7, 90, 48, 14)).string_(synthNotes[i].asString).font_(smallFont.boldVariant).stringColor_(colors[\text]).align_(\center).background_(Color.clear);
+	});
+	synthAccentButtons = Array.fill(steps, { |i|
+		Button(synthStepViews[i], Rect(7, 106, 48, 18)).states_([["ACC", colors[\muted], colors[\off]], ["ACC", colors[\bg], colors[\orange]]]).font_(smallFont.boldVariant).action_({ |b| synthAccents[i] = b.value.asInteger });
+	});
+	synthSlideButtons = Array.fill(steps, { |i|
+		Button(synthStepViews[i], Rect(7, 126, 48, 18)).states_([["SLD", colors[\muted], colors[\off]], ["SLD", colors[\bg], colors[\yellow]]]).font_(smallFont.boldVariant).action_({ |b| synthSlides[i] = b.value.asInteger });
+	});
+
+	sampleView = CompositeView(root, Rect(0, 856, 1216, 126)).background_(colors[\panel]).resize_(2);
+	makeLabel.(sampleView, Rect(12, 8, 1192, 18), "WAV LOOP SLICER", colors[\yellow]);
+	Button(sampleView, Rect(16, 32, 70, 28)).states_([["LOAD", colors[\bg], colors[\green]]]).font_(smallFont.boldVariant).action_({
+		Dialog.openPanel({ |path|
+			if(path.notNil) {
+				sampleBuf.notNil.if({ sampleBuf.free });
+				samplePath = path;
+				sampleBuf = Buffer.read(s, path);
+				sampleNameLabel.string_(PathName(path).fileName);
+			};
+		});
+	});
+	Button(sampleView, Rect(16, 66, 70, 24)).states_([["1-16", colors[\bg], colors[\blue]]]).font_(smallFont.boldVariant).action_({
+		sampleSlices = Array.fill(steps, { |i| i });
+		refreshMachineGui.();
+	});
+	sampleNameLabel = StaticText(sampleView, Rect(94, 36, 194, 18)).string_("no wav loaded").font_(smallFont).stringColor_(colors[\text]).background_(Color.clear);
+	makeLabel.(sampleView, Rect(302, 12, 64, 14), "FILTER", colors[\muted]);
+	sampleFilterMenu = PopUpMenu(sampleView, Rect(302, 34, 64, 24)).items_(["LP", "HP", "BP"]).value_(sampleParams[\filterMode]).font_(smallFont).background_(colors[\panel2]).stringColor_(colors[\text]).action_({ |menu|
+		sampleParams.put(\filterMode, menu.value);
+	});
+	makeLabel.(sampleView, Rect(302, 66, 64, 14), "DIV", colors[\muted]);
+	sampleDivMenu = PopUpMenu(sampleView, Rect(302, 84, 64, 24)).items_(clockDivNames).value_(sampleDivIndex).font_(smallFont).background_(colors[\panel2]).stringColor_(colors[\text]).action_({ |menu|
+		sampleDivIndex = menu.value.asInteger;
+		sampleStep = 0;
+		clockTick = 0;
+	});
+	sampleParamControls = Array.newClear(sampleParamOrder.size);
+	[
+		["LVL", \level], ["PCH", \pitch], ["CUT", \cutoff], ["RES", \res], ["DLY", \delaySend], ["REV", \reverbSend], ["PAN", \pan]
+	].do({ |item, i|
+		var spec, value;
+		spec = sampleParamSpec[item[1]];
+		value = sampleParams[item[1]].linlin(spec[0], spec[1], 0, 1).clip(0, 1);
+		sampleParamControls[i] = makeVSlider.(sampleView, Rect(382 + (i * 40), 30, 36, 86), item[0], value, { |val|
+			var mapped;
+			mapped = val.linlin(0, 1, spec[0], spec[1]);
+			sampleParams.put(item[1], mapped);
+		}, colors[\blue], [\sampleParam, item[1]]);
+	});
+	sampleSliceSliders = Array.newClear(steps);
+	sampleSliceLabels = Array.newClear(steps);
+	Array.fill(steps, { |i|
+		var x;
+		x = 670 + (i * 32);
+		makeLabel.(sampleView, Rect(x, 28, 28, 12), (i + 1).asString, colors[\muted]);
+		sampleSliceSliders[i] = Slider(sampleView, Rect(x + 3, 42, 22, 58)).orientation_(\vertical).value_(sampleSlices[i].linlin(0, 15, 0, 1)).background_(colors[\panel2]).knobColor_(colors[\blue]).action_({ |sl|
+			sampleSlices[i] = sl.value.linlin(0, 1, 0, 15).round(1).asInteger;
+			sampleSliceLabels[i].string_((sampleSlices[i] + 1).asString);
+		});
+		sampleSliceLabels[i] = StaticText(sampleView, Rect(x, 102, 28, 14)).string_((sampleSlices[i] + 1).asString).font_(smallFont.boldVariant).stringColor_(colors[\text]).align_(\center).background_(Color.clear);
+	});
+
+	synthView = CompositeView(root, Rect(0, 810, 720, 232)).background_(colors[\panel]).resize_(8);
+	makeLabel.(synthView, Rect(12, 8, 696, 18), "SH-101 SYNTH + SYNTH SENDS", colors[\yellow]);
+	makeLabel.(synthView, Rect(12, 30, 40, 14), "LFO", colors[\muted]);
+	synthLfoShapeMenu = PopUpMenu(synthView, Rect(54, 28, 66, 22)).items_(synthLfoShapeNames).value_(synthParams[\lfoShape]).font_(smallFont).background_(colors[\panel2]).stringColor_(colors[\text]).action_({ |menu|
+		synthParams.put(\lfoShape, menu.value.asInteger);
+	});
+	synthLfoDestMenu = PopUpMenu(synthView, Rect(126, 28, 72, 22)).items_(synthLfoDestNames).value_(synthParams[\lfoDest]).font_(smallFont).background_(colors[\panel2]).stringColor_(colors[\text]).action_({ |menu|
+		synthParams.put(\lfoDest, menu.value.asInteger);
+	});
+	synthLfoControls = Array.newClear(synthLfoOrder.size);
+	synthLfoControls[0] = makeHParam.(synthView, Rect(208, 28, 240, 24), "RATE", synthParams[\lfoRate], { |val| synthParams.put(\lfoRate, val) }, colors[\yellow], [\synthLfo, \lfoRate]);
+	synthLfoControls[1] = makeHParam.(synthView, Rect(456, 28, 240, 24), "AMT", synthParams[\lfoAmount], { |val| synthParams.put(\lfoAmount, val) }, colors[\yellow], [\synthLfo, \lfoAmount]);
+	synthParamControls = Array.newClear(synthParamOrder.size);
+	[
+		["WAVE", \wave], ["PW", \pw], ["SUB", \sub], ["NOISE", \noise], ["CUT", \cutoff], ["RES", \res],
+		["ENV", \envAmt], ["DRV", \drive], ["DLY", \delaySend], ["REV", \reverbSend]
+	].do({ |item, i|
+		synthParamControls[i] = makeVSlider.(synthView, Rect(12 + (i * 50), 58, 42, 150), item[0], synthParams[item[1]], { |val| synthParams.put(item[1], val) }, colors[\green], [\synthParam, item[1]]);
+	});
+	synthEnvControls = Array.newClear(synthEnvOrder.size);
+	[
+		["ATK", \attack], ["DEC", \decay], ["SUS", \sustain], ["REL", \release]
+	].do({ |item, i|
+		var spec, value;
+		spec = synthEnvSpec[item[1]];
+		value = synthParams[item[1]].linlin(spec[0], spec[1], 0, 1).clip(0, 1);
+		synthEnvControls[i] = makeVSlider.(synthView, Rect(512 + (i * 50), 58, 42, 150), item[0], value, { |val|
+			var mapped;
+			mapped = val.linlin(0, 1, spec[0], spec[1]);
+			synthParams.put(item[1], mapped);
+		}, colors[\green], [\synthEnv, item[1]]);
+	});
+
+	fxView = CompositeView(root, Rect(734, 636, 482, 232)).background_(colors[\panel]).resize_(3);
+	makeLabel.(fxView, Rect(12, 8, 458, 18), "TAPE DELAY + REVERB", colors[\yellow]);
+	delaySyncButton = Button(fxView, Rect(16, 30, 58, 22))
+		.states_([["SYNC", colors[\muted], colors[\off]], ["SYNC", colors[\bg], colors[\yellow]]])
+		.font_(smallFont.boldVariant)
+		.value_(delaySyncEnabled)
+		.action_({ |button|
+			delaySyncEnabled = button.value.asInteger;
+			updateDelaySync.();
+			refreshMachineGui.();
+		});
+	delaySyncMenu = PopUpMenu(fxView, Rect(80, 30, 72, 22))
+		.items_(delaySyncNames)
+		.value_(delaySyncIndex)
+		.font_(smallFont)
+		.background_(colors[\panel2])
+		.stringColor_(colors[\text])
+		.action_({ |menu|
+			delaySyncIndex = menu.value.asInteger;
+			updateDelaySync.();
+			refreshMachineGui.();
+		});
+	fxParamControls = Array.newClear(fxParamOrder.size);
+	fxParamControls[0] = makeVSlider.(fxView, Rect(16, 58, 46, 150), "DLY T", fxParams[\delayTime].linlin(0.05, 1.1, 0, 1), { |val| delaySyncEnabled = 0; fxParams.put(\delayTime, val.linlin(0, 1, 0.05, 1.1)); delaySynth.set(\time, fxParams[\delayTime]); if(delaySyncButton.notNil) { delaySyncButton.value_(0) } }, colors[\orange], [\fx, \delayTime]);
+	fxParamControls[1] = makeVSlider.(fxView, Rect(66, 58, 46, 150), "FDBK", fxParams[\delayFeedback].linlin(0, 0.9, 0, 1), { |val| fxParams.put(\delayFeedback, val.linlin(0, 1, 0, 0.9)); delaySynth.set(\feedback, fxParams[\delayFeedback]) }, colors[\orange], [\fx, \delayFeedback]);
+	fxParamControls[2] = makeVSlider.(fxView, Rect(116, 58, 46, 150), "WOW", fxParams[\delayWow].linlin(0, 0.08, 0, 1), { |val| fxParams.put(\delayWow, val.linlin(0, 1, 0, 0.08)); delaySynth.set(\wow, fxParams[\delayWow]) }, colors[\orange], [\fx, \delayWow]);
+	fxParamControls[3] = makeVSlider.(fxView, Rect(166, 58, 46, 150), "TONE", fxParams[\delayTone], { |val| fxParams.put(\delayTone, val); delaySynth.set(\tone, val) }, colors[\orange], [\fx, \delayTone]);
+	fxParamControls[4] = makeVSlider.(fxView, Rect(216, 58, 46, 150), "D WET", fxParams[\delayWet], { |val| fxParams.put(\delayWet, val); delaySynth.set(\wet, val) }, colors[\orange], [\fx, \delayWet]);
+	fxParamControls[5] = makeVSlider.(fxView, Rect(296, 58, 46, 150), "ROOM", fxParams[\reverbRoom], { |val| fxParams.put(\reverbRoom, val); reverbSynth.set(\room, val) }, colors[\blue], [\fx, \reverbRoom]);
+	fxParamControls[6] = makeVSlider.(fxView, Rect(346, 58, 46, 150), "DAMP", fxParams[\reverbDamp], { |val| fxParams.put(\reverbDamp, val); reverbSynth.set(\damp, val) }, colors[\blue], [\fx, \reverbDamp]);
+	fxParamControls[7] = makeVSlider.(fxView, Rect(396, 58, 46, 150), "R WET", fxParams[\reverbWet], { |val| fxParams.put(\reverbWet, val); reverbSynth.set(\wet, val) }, colors[\blue], [\fx, \reverbWet]);
+	fxParamControls[8] = makeVSlider.(fxView, Rect(438, 58, 38, 150), "SHMR", fxParams[\reverbShimmer], { |val| fxParams.put(\reverbShimmer, val); reverbSynth.set(\shimmer, val) }, colors[\blue], [\fx, \reverbShimmer]);
+
+	mixerView = CompositeView(root, Rect(1230, 0, 260, 982)).background_(colors[\panel]).resize_(3);
+	makeLabel.(mixerView, Rect(8, 8, 244, 18), "LEVEL MIXER", colors[\yellow]);
+	presetPrevButton = Button(mixerView, Rect(128, 8, 42, 20))
+		.states_([["PREV", colors[\text], colors[\panel2]]])
+		.font_(smallFont.boldVariant)
+		.action_({
+			if(midiLearnActive) {
+				registerMidiLearn.([\presetNav, \prev]);
+			} {
+				selectPresetOffset.(-1);
+			};
+		});
+	presetNextButton = Button(mixerView, Rect(174, 8, 42, 20))
+		.states_([["NEXT", colors[\text], colors[\panel2]]])
+		.font_(smallFont.boldVariant)
+		.action_({
+			if(midiLearnActive) {
+				registerMidiLearn.([\presetNav, \next]);
+			} {
+				selectPresetOffset.(1);
+			};
+		});
+	midiLearnButton = Button(mixerView, Rect(220, 8, 34, 20))
+		.states_([["LRN", colors[\text], colors[\panel2]], ["LRN", colors[\bg], colors[\yellow]]])
+		.font_(smallFont.boldVariant)
+		.action_({ |button|
+			midiLearnActive = button.value == 1;
+			midiLearnParam = nil;
+			if(midiLearnActive) {
+				button.states_([["LRN", colors[\text], colors[\panel2]], ["GUI", colors[\bg], colors[\yellow]]]);
+			} {
+				button.states_([["LRN", colors[\text], colors[\panel2]], ["LRN", colors[\bg], colors[\yellow]]]);
+			};
+		});
+	presetExportButton = Button(mixerView, Rect(10, 34, 56, 20))
+		.states_([["P EXP", colors[\text], colors[\panel2]]])
+		.font_(smallFont.boldVariant)
+		.action_({ exportPresets.() });
+	presetImportButton = Button(mixerView, Rect(70, 34, 56, 20))
+		.states_([["P IMP", colors[\text], colors[\panel2]]])
+		.font_(smallFont.boldVariant)
+		.action_({ importPresets.() });
+	midiExportButton = Button(mixerView, Rect(134, 34, 56, 20))
+		.states_([["M EXP", colors[\text], colors[\panel2]]])
+		.font_(smallFont.boldVariant)
+		.action_({ exportMidiMappings.() });
+	midiImportButton = Button(mixerView, Rect(194, 34, 56, 20))
+		.states_([["M IMP", colors[\text], colors[\panel2]]])
+		.font_(smallFont.boldVariant)
+		.action_({ importMidiMappings.() });
+	StaticText(mixerView, Rect(10, 58, 238, 20)).string_("FILTER: left = low pass, right = high pass").font_(smallFont).stringColor_(colors[\muted]).align_(\center).background_(Color.clear);
+	mixerRows = Array.newClear(drumVoices.size + 2);
+	drumVoices.do({ |voice, i|
+		mixerRows[i] = makeMixerRow.(mixerView, 82 + (i * 46), voice[\name],
+			{ voice[\level].clip(0, 1) }, { |val| voice[\level] = val },
+			{ voice[\muted].asInteger }, { |val| voice[\muted] = val },
+			{ voice[\solo].asInteger }, { |val| voice[\solo] = val },
+			{ voice[\mixFilter].clip(0, 1) }, { |val| voice[\mixFilter] = val },
+			{ voice[\mixDrive].clip(0, 1) }, { |val| voice[\mixDrive] = val },
+			[\mixer, i, \level], [\mixer, i, \filter], [\mixer, i, \drive], [\mixer, i, \mute], [\mixer, i, \solo]
+		);
+	});
+	mixerRows[drumVoices.size] = makeMixerRow.(mixerView, 82 + (drumVoices.size * 46), "101",
+		{ synthParams[\level].clip(0, 1) }, { |val| synthParams.put(\level, val) },
+		{ synthMixer[\muted].asInteger }, { |val| synthMixer.put(\muted, val) },
+		{ synthMixer[\solo].asInteger }, { |val| synthMixer.put(\solo, val) },
+		{ synthMixer[\mixFilter].clip(0, 1) }, { |val| synthMixer.put(\mixFilter, val) },
+		{ synthMixer[\mixDrive].clip(0, 1) }, { |val| synthMixer.put(\mixDrive, val) },
+		[\mixer, drumVoices.size, \level], [\mixer, drumVoices.size, \filter], [\mixer, drumVoices.size, \drive], [\mixer, drumVoices.size, \mute], [\mixer, drumVoices.size, \solo]
+	);
+	mixerRows[drumVoices.size + 1] = makeMixerRow.(mixerView, 82 + ((drumVoices.size + 1) * 46), "WAV",
+		{ sampleParams[\level].clip(0, 1) }, { |val| sampleParams.put(\level, val) },
+		{ sampleMixer[\muted].asInteger }, { |val| sampleMixer.put(\muted, val) },
+		{ sampleMixer[\solo].asInteger }, { |val| sampleMixer.put(\solo, val) },
+		{ sampleMixer[\mixFilter].clip(0, 1) }, { |val| sampleMixer.put(\mixFilter, val) },
+		{ sampleMixer[\mixDrive].clip(0, 1) }, { |val| sampleMixer.put(\mixDrive, val) },
+		[\mixer, drumVoices.size + 1, \level], [\mixer, drumVoices.size + 1, \filter], [\mixer, drumVoices.size + 1, \drive], [\mixer, drumVoices.size + 1, \mute], [\mixer, drumVoices.size + 1, \solo]
+	);
+	makeLabel.(mixerView, Rect(8, 500, 244, 18), "SSL BUS COMP", colors[\yellow]);
+	StaticText(mixerView, Rect(10, 520, 238, 22)).string_("summing compressor + drive").font_(smallFont).stringColor_(colors[\muted]).align_(\center).background_(Color.clear);
+	masterCompControls = Array.newClear(masterCompOrder.size);
+	[
+		["THR", \threshold], ["RAT", \ratio], ["ATK", \attack], ["REL", \release], ["MAKE", \makeup], ["DRV", \drive]
+	].do({ |item, i|
+		masterCompControls[i] = makeVSlider.(mixerView, Rect(12 + (i * 40), 548, 36, 122), item[0], masterCompParams[item[1]], { |val|
+			masterCompParams.put(item[1], val);
+			masterSynth.set(item[1], val);
+		}, if(item[1] == \drive) { colors[\red] } { colors[\orange] }, [\masterComp, item[1]]);
+	});
+	makeLabel.(mixerView, Rect(8, 692, 244, 18), "MASTER OUT", colors[\yellow]);
+	masterVolumeControl = makeVSlider.(mixerView, Rect(16, 718, 52, 150), "VOL", masterAmp, { |val|
+		masterAmp = val.clip(0, 1);
+		masterSynth.set(\amp, masterAmp);
+	}, colors[\green], [\masterVolume]);
+	makeLabel.(mixerView, Rect(94, 718, 54, 14), "METER", colors[\muted]);
+	masterMeter = LevelIndicator(mixerView, Rect(108, 740, 24, 108)).value_(0).warning_(0.7).critical_(0.9);
+	refreshMixerGui = {
+		drumVoices.do({ |voice, i|
+			mixerRows[i][\level].value_(voice[\level].clip(0, 1));
+			mixerRows[i][\filter].value_(voice[\mixFilter].clip(0, 1));
+			mixerRows[i][\drive].value_(voice[\mixDrive].clip(0, 1));
+			mixerRows[i][\mute].value_(voice[\muted].asInteger);
+			mixerRows[i][\solo].value_(voice[\solo].asInteger);
+		});
+		mixerRows[drumVoices.size][\level].value_(synthParams[\level].clip(0, 1));
+		mixerRows[drumVoices.size][\filter].value_(synthMixer[\mixFilter].clip(0, 1));
+		mixerRows[drumVoices.size][\drive].value_(synthMixer[\mixDrive].clip(0, 1));
+		mixerRows[drumVoices.size][\mute].value_(synthMixer[\muted].asInteger);
+		mixerRows[drumVoices.size][\solo].value_(synthMixer[\solo].asInteger);
+		mixerRows[drumVoices.size + 1][\level].value_(sampleParams[\level].clip(0, 1));
+		mixerRows[drumVoices.size + 1][\filter].value_(sampleMixer[\mixFilter].clip(0, 1));
+		mixerRows[drumVoices.size + 1][\drive].value_(sampleMixer[\mixDrive].clip(0, 1));
+		mixerRows[drumVoices.size + 1][\mute].value_(sampleMixer[\muted].asInteger);
+		mixerRows[drumVoices.size + 1][\solo].value_(sampleMixer[\solo].asInteger);
+	};
+
+	setMixerChannel = { |index, param, value|
+		var val;
+		val = value.clip(0, 1);
+		if(index < drumVoices.size) {
+			if(param == \level) { drumVoices[index][\level] = val };
+			if(param == \filter) { drumVoices[index][\mixFilter] = val };
+			if(param == \reverb) { drumVoices[index][\reverb] = val };
+			if(param == \delay) { drumVoices[index][\delay] = val };
+			if(param == \drive) { drumVoices[index][\mixDrive] = val };
+			if(param == \mute) { drumVoices[index][\muted] = (val > 0.5).asInteger };
+			if(param == \solo) { drumVoices[index][\solo] = (val > 0.5).asInteger };
+		} {
+			if(index == drumVoices.size) {
+				if(param == \level) { synthParams.put(\level, val) };
+				if(param == \filter) { synthMixer.put(\mixFilter, val) };
+				if(param == \reverb) { synthParams.put(\reverbSend, val) };
+				if(param == \delay) { synthParams.put(\delaySend, val) };
+				if(param == \drive) { synthMixer.put(\mixDrive, val) };
+				if(param == \mute) { synthMixer.put(\muted, (val > 0.5).asInteger) };
+				if(param == \solo) { synthMixer.put(\solo, (val > 0.5).asInteger) };
+			} {
+				if(index == (drumVoices.size + 1)) {
+					if(param == \level) { sampleParams.put(\level, val) };
+					if(param == \filter) { sampleMixer.put(\mixFilter, val) };
+					if(param == \reverb) { sampleParams.put(\reverbSend, val) };
+					if(param == \delay) { sampleParams.put(\delaySend, val) };
+					if(param == \drive) { sampleMixer.put(\mixDrive, val) };
+					if(param == \mute) { sampleMixer.put(\muted, (val > 0.5).asInteger) };
+					if(param == \solo) { sampleMixer.put(\solo, (val > 0.5).asInteger) };
+				};
+			};
+		};
+		{
+			if(refreshMixerGui.notNil) { refreshMixerGui.() };
+			if(masterVolumeControl.notNil) {
+				masterVolumeControl[\slider].value_(masterAmp.clip(0, 1));
+				masterVolumeControl[\box].value_(masterAmp.round(0.01));
+			};
+		}.defer;
+	};
+
+	applyMidiLearnParam = { |param, value|
+		if(param.notNil) {
+			case
+			{ param[0] == \presetNav } {
+				var key, active;
+				key = param.asCompileString;
+				active = value > 0.5;
+				if(active and: { (midiActionLatches[key] ? false).not }) {
+					if(param[1] == \prev) { selectPresetOffset.(-1) };
+					if(param[1] == \next) { selectPresetOffset.(1) };
+				};
+				midiActionLatches.put(key, active);
+			}
+			{ param[0] == \mixer } {
+				setMixerChannel.(param[1].asInteger, param[2], value);
+			}
+			{ param[0] == \drumLevel } {
+				drumVoices[param[1].asInteger][\level] = value;
+				{ if(refreshMixerGui.notNil) { refreshMixerGui.() } }.defer;
+			}
+			{ param[0] == \drumParam } {
+				var vi, key, spec, mapped, args;
+				vi = param[1].asInteger;
+				key = param[2];
+				spec = drumParamSpec.(drumVoices[vi], key);
+				mapped = value.linlin(0, 1, spec[0], spec[1]);
+				if(key == \delay) {
+					drumVoices[vi][\delay] = mapped;
+				} {
+					if(key == \reverb) {
+						drumVoices[vi][\reverb] = mapped;
+					} {
+						if(key == \pan) {
+							drumVoices[vi][\pan] = mapped;
+						} {
+							args = drumVoices[vi][\args].copy;
+							args.put(key, mapped);
+							drumVoices[vi][\args] = args;
+						};
+					};
+				};
+				{ refreshMachineGui.() }.defer;
+			}
+			{ param[0] == \sampleParam } {
+				var spec, mapped;
+				spec = sampleParamSpec[param[1]];
+				mapped = value.linlin(0, 1, spec[0], spec[1]);
+				sampleParams.put(param[1], mapped);
+				{ refreshMachineGui.() }.defer;
+			}
+			{ param[0] == \synthParam } {
+				synthParams.put(param[1], value);
+				{ refreshMachineGui.() }.defer;
+			}
+			{ param[0] == \synthEnv } {
+				var spec, mapped;
+				spec = synthEnvSpec[param[1]];
+				mapped = value.linlin(0, 1, spec[0], spec[1]);
+				synthParams.put(param[1], mapped);
+				{ refreshMachineGui.() }.defer;
+			}
+			{ param[0] == \synthLfo } {
+				synthParams.put(param[1], value);
+				{ refreshMachineGui.() }.defer;
+			}
+			{ param[0] == \fx } {
+				var spec, mapped;
+				spec = fxParamSpec[param[1]];
+				mapped = value.linlin(0, 1, spec[0], spec[1]);
+				fxParams.put(param[1], mapped);
+				delaySynth.set(\time, fxParams[\delayTime], \feedback, fxParams[\delayFeedback], \wow, fxParams[\delayWow], \tone, fxParams[\delayTone], \wet, fxParams[\delayWet]);
+				reverbSynth.set(\room, fxParams[\reverbRoom], \damp, fxParams[\reverbDamp], \wet, fxParams[\reverbWet], \shimmer, fxParams[\reverbShimmer]);
+				{ refreshMachineGui.() }.defer;
+			}
+			{ param[0] == \masterComp } {
+				masterCompParams.put(param[1], value);
+				masterSynth.set(param[1], value);
+				{ refreshMachineGui.() }.defer;
+			}
+			{ param[0] == \masterVolume } {
+				masterAmp = value;
+				masterSynth.set(\amp, masterAmp);
+				{ refreshMachineGui.() }.defer;
+			};
+		};
+	};
+
+	applyMidiNoteParam = { |param, velocity, isOn=1|
+		var value, index, mixerParam, current;
+		value = (velocity.clip(0, 127) / 127).clip(0, 1);
+		if(param.notNil) {
+			if(param[0] == \presetNav) {
+				applyMidiLearnParam.(param, if(isOn == 1) { 1 } { 0 });
+			} {
+				if(isOn == 1) {
+					if((param[0] == \mixer) and: { (param[2] == \mute) or: { param[2] == \solo } }) {
+						index = param[1].asInteger;
+						mixerParam = param[2];
+						current = 0;
+						if(index < drumVoices.size) {
+							current = if(mixerParam == \mute) { drumVoices[index][\muted] } { drumVoices[index][\solo] };
+						} {
+							if(index == drumVoices.size) {
+								current = if(mixerParam == \mute) { synthMixer[\muted] } { synthMixer[\solo] };
+							} {
+								if(index == (drumVoices.size + 1)) {
+									current = if(mixerParam == \mute) { sampleMixer[\muted] } { sampleMixer[\solo] };
+								};
+							};
+						};
+						setMixerChannel.(index, mixerParam, if(current.asInteger == 1) { 0 } { 1 });
+					} {
+						applyMidiLearnParam.(param, value);
+					};
+				};
+			};
+		};
+	};
+
+	setupMidiMix = {
+		MIDIClient.init;
+		MIDIIn.connectAll;
+		loadMidiMappings.();
+		midiMixVolumeCCs.do({ |cc, i| if(midiMappings[cc].isNil) { midiMappings.put(cc, [\mixer, i, \level]) } });
+		midiMixFilterCCs.do({ |cc, i| if(midiMappings[cc].isNil) { midiMappings.put(cc, [\mixer, i, \filter]) } });
+		midiMixReverbCCs.do({ |cc, i| if(midiMappings[cc].isNil) { midiMappings.put(cc, [\mixer, i, \reverb]) } });
+		midiMixDelayCCs.do({ |cc, i| if(midiMappings[cc].isNil) { midiMappings.put(cc, [\mixer, i, \delay]) } });
+		if(midiMappings[midiMixMasterCC].isNil) { midiMappings.put(midiMixMasterCC, [\mixer, drumVoices.size + 1, \level]) };
+		if(midiMappings[midiMixWavFilterCC].isNil) { midiMappings.put(midiMixWavFilterCC, [\mixer, drumVoices.size + 1, \filter]) };
+		if(midiMappings[midiMixWavReverbCC].isNil) { midiMappings.put(midiMixWavReverbCC, [\mixer, drumVoices.size + 1, \reverb]) };
+		if(midiMappings[midiMixWavDelayCC].isNil) { midiMappings.put(midiMixWavDelayCC, [\mixer, drumVoices.size + 1, \delay]) };
+		MIDIdef.cc(\groovebox_midi_learn_router, { |val, cc|
+			if(midiLearnActive and: { midiLearnParam.notNil }) {
+				midiMappings.put(cc, midiLearnParam.copy);
+				saveMidiMappings.();
+				midiLearnActive = false;
+				midiLearnParam = nil;
+				{
+					if(midiLearnButton.notNil) {
+						midiLearnButton.value_(0);
+						midiLearnButton.states_([["LRN", colors[\text], colors[\panel2]], ["LRN", colors[\bg], colors[\yellow]]]);
+					};
+				}.defer;
+			} {
+				if(midiMappings[cc].notNil) {
+					applyMidiLearnParam.(midiMappings[cc], val / 127);
+				};
+			};
+		}, nil);
+		MIDIdef.noteOn(\groovebox_midi_note_learn_router, { |vel, note|
+			if(vel <= 0) {
+				if(midiNoteMappings[note].notNil) {
+					applyMidiNoteParam.(midiNoteMappings[note], 0, 0);
+				};
+			} {
+				if(midiLearnActive and: { midiLearnParam.notNil }) {
+					midiNoteMappings.put(note, midiLearnParam.copy);
+					saveMidiMappings.();
+					midiLearnActive = false;
+					midiLearnParam = nil;
+					{
+						if(midiLearnButton.notNil) {
+							midiLearnButton.value_(0);
+							midiLearnButton.states_([["LRN", colors[\text], colors[\panel2]], ["LRN", colors[\bg], colors[\yellow]]]);
+						};
+					}.defer;
+				} {
+					if(midiNoteMappings[note].notNil) {
+						applyMidiNoteParam.(midiNoteMappings[note], vel, 1);
+					};
+				};
+			};
+		}, nil);
+		MIDIdef.noteOff(\groovebox_midi_note_off_router, { |vel, note|
+			if(midiNoteMappings[note].notNil) {
+				applyMidiNoteParam.(midiNoteMappings[note], 0, 0);
+			};
+		}, nil);
+	};
+	setupMidiMix.();
+
+	OSCdef(\combined_groovebox_song_preset, { |msg|
+		var name, state;
+		name = msg[1].asString;
+		("Main Groovebox received song preset request: " ++ name).postln;
+		if(presets[name].isNil) {
+			loadPresets.();
+		};
+		state = presets[name];
+		if(state.notNil) {
+			queuePreset.(state);
+			("Main Groovebox queued preset: " ++ name).postln;
+		} {
+			("Main Groovebox could not find preset: " ++ name).postln;
+		};
+	}, '/combinedGroovebox/preset');
+	("Main Groovebox song OSC receiver armed on language port " ++ NetAddr.langPort.asString ++ " path /combinedGroovebox/preset").postln;
+
+	[
+		win.view, root, transportView, drumView, drumEditView, synthSeqView, sampleView, synthView, fxView, mixerView,
+		playButton, stopButton, randomDrumButton, randomSynthButton, randomWavButton, randomAllButton, presetPrevButton, presetNextButton, midiLearnButton, presetExportButton, presetImportButton, midiExportButton, midiImportButton, swingSlider, rootBox, presetMenu,
+		drumDivMenu,
+		synthKeyMenu, synthScaleMenu, synthDivMenu, synthLfoShapeMenu, synthLfoDestMenu,
+		sampleFilterMenu, sampleDivMenu, delaySyncButton, delaySyncMenu
+	].do({ |view|
+		if(view.notNil) { view.keyDownAction_(handleSpaceKey) };
+	});
+	drumButtons.do({ |row| row.do({ |button| button.keyDownAction_(handleSpaceKey) }) });
+	drumClearButtons.do({ |button| if(button.notNil) { button.keyDownAction_(handleSpaceKey) } });
+	drumMuteButtons.do({ |button| if(button.notNil) { button.keyDownAction_(handleSpaceKey) } });
+	drumLevelSliders.do({ |slider| if(slider.notNil) { slider.keyDownAction_(handleSpaceKey) } });
+	drumVoiceButtons.do({ |button| button.keyDownAction_(handleSpaceKey) });
+	drumParamRows.do({ |row|
+		row[\row].keyDownAction_(handleSpaceKey);
+		row[\slider].keyDownAction_(handleSpaceKey);
+	});
+	synthGateButtons.do({ |button| button.keyDownAction_(handleSpaceKey) });
+	synthNoteSliders.do({ |slider| slider.keyDownAction_(handleSpaceKey) });
+	synthAccentButtons.do({ |button| button.keyDownAction_(handleSpaceKey) });
+	synthSlideButtons.do({ |button| button.keyDownAction_(handleSpaceKey) });
+	sampleParamControls.do({ |control|
+		control[\slider].keyDownAction_(handleSpaceKey);
+	});
+	sampleSliceSliders.do({ |slider| slider.keyDownAction_(handleSpaceKey) });
+	synthParamControls.do({ |control|
+		control[\slider].keyDownAction_(handleSpaceKey);
+	});
+	synthEnvControls.do({ |control|
+		control[\slider].keyDownAction_(handleSpaceKey);
+	});
+	synthLfoControls.do({ |control|
+		control[\row].keyDownAction_(handleSpaceKey);
+		control[\slider].keyDownAction_(handleSpaceKey);
+	});
+	fxParamControls.do({ |control|
+		control[\slider].keyDownAction_(handleSpaceKey);
+	});
+	mixerRows.do({ |row|
+		row[\row].keyDownAction_(handleSpaceKey);
+		row[\level].keyDownAction_(handleSpaceKey);
+		row[\filter].keyDownAction_(handleSpaceKey);
+		row[\drive].keyDownAction_(handleSpaceKey);
+		row[\mute].keyDownAction_(handleSpaceKey);
+		row[\solo].keyDownAction_(handleSpaceKey);
+	});
+	masterCompControls.do({ |control|
+		control[\slider].keyDownAction_(handleSpaceKey);
+	});
+	masterVolumeControl[\slider].keyDownAction_(handleSpaceKey);
+
+	win.onClose_({
+		task.notNil.if({ task.stop });
+		sampleBuf.notNil.if({ sampleBuf.free });
+		midiMixVolumeCCs.do({ |cc, i| MIDIdef(("midimix_vol_" ++ i.asString).asSymbol).free });
+		midiMixFilterCCs.do({ |cc, i| MIDIdef(("midimix_filter_" ++ i.asString).asSymbol).free });
+		midiMixReverbCCs.do({ |cc, i| MIDIdef(("midimix_reverb_" ++ i.asString).asSymbol).free });
+		midiMixDelayCCs.do({ |cc, i| MIDIdef(("midimix_delay_" ++ i.asString).asSymbol).free });
+		MIDIdef(\midimix_wav_level).free;
+		MIDIdef(\midimix_wav_filter).free;
+		MIDIdef(\midimix_wav_reverb).free;
+		MIDIdef(\midimix_wav_delay).free;
+		MIDIdef(\groovebox_midi_learn_router).free;
+		MIDIdef(\groovebox_midi_note_learn_router).free;
+		MIDIdef(\groovebox_midi_note_off_router).free;
+		OSCdef(\combined_groovebox_song_preset).free;
+		delaySynth.free; reverbSynth.free; masterSynth.free;
+		masterBus.free; delayBus.free; reverbBus.free;
+	});
+
+	redrawAll.();
+	stopButton.background_(colors[\red]);
+});
+)
