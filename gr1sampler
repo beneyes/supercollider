@@ -1,0 +1,355 @@
+/*
+GR-1 inspired granular sampler for SuperCollider
+
+This is not an emulation of the Tasty Chips GR-1. It is a SuperCollider
+instrument inspired by its broad workflow: sample-based granular clouds,
+hands-on control, dense pads/drones, pitchable playback, position scanning,
+freeze, stereo spread, and performance-friendly presets.
+
+How to use:
+1. Open this file in SuperCollider.
+2. Evaluate the whole file.
+3. Click "Load sample".
+4. Click "Start".
+5. Shape the cloud with Density, Grain ms, Position, Spray, Scan, Pitch,
+   Pitch spread, Pan spread, Filter, Delay, and Reverb.
+*/
+
+(
+s.waitForBoot {
+    var win, loadButton, startButton, stopButton, presetMenu;
+    var status, waveformView, sampleNameText;
+    var sliders, labels, values, specs, synth, buf, path, makeSlider, updateParam;
+    var presets, applyPreset, defaultPath, waveformData, loadWaveform;
+    var scanPhase, scanRoutine;
+
+    defaultPath = Platform.resourceDir +/+ "sounds/a11wlk01.wav";
+    buf = Buffer.read(s, defaultPath);
+    waveformData = FloatArray.fill(512, 0);
+    scanPhase = 0;
+
+    SynthDef(\gr1InspiredSampler, {
+        |out=0, bufnum=0, gate=1, amp=0.35,
+        density=38, grainDur=0.16, pos=0.35, spray=0.12, scan=0.015, freeze=0,
+        rate=1, rateSpread=0.015, panSpread=0.85, jitter=0.015,
+        atk=0.8, rel=3.2, cutoff=12000, rq=0.5, delayMix=0.12, delayTime=0.36,
+        reverbMix=0.24, shimmer=0.0|
+
+        var trig, dur, frames, basePos, scanPos, randomPos, grainPos;
+        var grainRate, pan, sig, env, filtered, delayed, wet, shimmerSig;
+
+        trig = Dust.kr(density.clip(1, 220));
+        dur = grainDur.clip(0.01, 1.2);
+        frames = BufFrames.kr(bufnum).max(1);
+
+        scanPos = Sweep.kr(0, scan);
+
+        basePos = Select.kr(freeze > 0.5, [
+            (pos + scanPos).wrap(0, 1),
+            pos
+        ]);
+
+        randomPos = TRand.kr(spray.neg, spray, trig);
+        grainPos = (basePos + randomPos + LFNoise1.kr(density.max(1), jitter)).wrap(0, 1);
+
+        grainRate = rate * TExpRand.kr(
+            (1 - rateSpread).max(0.125),
+            (1 + rateSpread).max(0.126),
+            trig
+        );
+
+        pan = TRand.kr(panSpread.neg, panSpread, trig);
+
+        sig = GrainBuf.ar(
+            numChannels: 2,
+            trigger: trig,
+            dur: dur,
+            sndbuf: bufnum,
+            rate: grainRate,
+            pos: grainPos,
+            interp: 4,
+            pan: pan,
+            envbufnum: -1,
+            maxGrains: 512
+        );
+
+        env = EnvGen.kr(Env.asr(atk, 1, rel, curve: -4), gate, doneAction: 2);
+        filtered = RLPF.ar(sig, cutoff.clip(60, 18000), rq.clip(0.05, 1.0));
+
+        delayed = CombC.ar(
+            filtered,
+            maxdelaytime: 1.5,
+            delaytime: delayTime.clip(0.02, 1.5),
+            decaytime: 3.5
+        );
+
+        shimmerSig = PitchShift.ar(filtered, 0.18, 2.0, 0.02, 0.01) * shimmer;
+        wet = FreeVerb2.ar(
+            filtered[0] + shimmerSig[0],
+            filtered[1] + shimmerSig[1],
+            mix: reverbMix.clip(0, 1),
+            room: 0.86,
+            damp: 0.42
+        );
+
+        sig = XFade2.ar(filtered, delayed, (delayMix * 2 - 1).clip(-1, 1));
+        sig = XFade2.ar(sig, wet, (reverbMix * 2 - 1).clip(-1, 1));
+        sig = LeakDC.ar(Limiter.ar(sig * amp * env, 0.95));
+
+        Out.ar(out, sig);
+    }).add;
+
+    s.sync;
+
+    sliders = IdentityDictionary.new;
+    labels = IdentityDictionary.new;
+    values = IdentityDictionary.new;
+    specs = IdentityDictionary.new;
+
+    updateParam = { |key, val|
+        values[key] = val;
+        if (synth.notNil) {
+            synth.set(key, val);
+        };
+        if ([\pos, \scan, \freeze, \spray].includes(key)) {
+            if (waveformView.notNil) { waveformView.refresh; };
+        };
+    };
+
+    loadWaveform = { |samplePath|
+        var file, frames, channels, step, raw, points;
+        {
+            file = SoundFile.openRead(samplePath);
+            if (file.notNil) {
+                frames = file.numFrames;
+                channels = file.numChannels.max(1);
+                step = (frames / 512).ceil.max(1);
+                raw = FloatArray.newClear(step * channels);
+                points = FloatArray.newClear(512);
+
+                512.do { |i|
+                    var startFrame, peak;
+                    startFrame = (i * step).min(frames - 1);
+                    file.seek(startFrame);
+                    raw = FloatArray.newClear(step * channels);
+                    file.readData(raw);
+                    peak = 0;
+                    raw.do { |sample|
+                        peak = peak.max(sample.abs);
+                    };
+                    points[i] = peak;
+                };
+
+                file.close;
+                {
+                    waveformData = points;
+                    if (waveformView.notNil) { waveformView.refresh; };
+                }.defer;
+            };
+        }.fork(AppClock);
+    };
+
+    makeSlider = { |parent, name, key, spec, initial, y|
+        var label, number, slider;
+        label = StaticText(parent, Rect(16, y, 110, 20)).string_(name);
+        slider = Slider(parent, Rect(126, y, 260, 20));
+        number = StaticText(parent, Rect(396, y, 76, 20)).align_(\right);
+        slider.value_(spec.unmap(initial));
+        number.string_(initial.round(0.001).asString);
+        values[key] = initial;
+        specs[key] = spec;
+        slider.action_({ |view|
+            var val = spec.map(view.value);
+            number.string_(val.round(0.001).asString);
+            updateParam.(key, val);
+        });
+        sliders[key] = slider;
+        labels[key] = number;
+    };
+
+    presets = IdentityDictionary[
+        \CloudPad -> (
+            density: 52, grainDur: 0.22, spray: 0.18, scan: 0.008, rate: 1,
+            rateSpread: 0.018, panSpread: 0.9, cutoff: 9500, delayMix: 0.1,
+            reverbMix: 0.36, shimmer: 0.05, amp: 0.34
+        ),
+        \FrozenChoir -> (
+            density: 75, grainDur: 0.34, spray: 0.05, scan: 0, rate: 0.5,
+            rateSpread: 0.025, panSpread: 1, cutoff: 7600, delayMix: 0.18,
+            reverbMix: 0.48, shimmer: 0.14, amp: 0.32
+        ),
+        \Shards -> (
+            density: 115, grainDur: 0.045, spray: 0.42, scan: 0.055, rate: 1,
+            rateSpread: 0.22, panSpread: 1, cutoff: 14500, delayMix: 0.24,
+            reverbMix: 0.2, shimmer: 0.0, amp: 0.28
+        ),
+        \SlowScanner -> (
+            density: 32, grainDur: 0.18, spray: 0.1, scan: 0.025, rate: 1,
+            rateSpread: 0.01, panSpread: 0.7, cutoff: 11000, delayMix: 0.08,
+            reverbMix: 0.28, shimmer: 0.02, amp: 0.36
+        ),
+        \SubOctaveMist -> (
+            density: 64, grainDur: 0.28, spray: 0.14, scan: 0.006, rate: 0.5,
+            rateSpread: 0.012, panSpread: 0.95, cutoff: 5200, delayMix: 0.16,
+            reverbMix: 0.44, shimmer: 0.08, amp: 0.35
+        )
+    ];
+
+    applyPreset = { |preset|
+        preset.keysValuesDo { |key, val|
+            if (sliders[key].notNil) {
+                sliders[key].valueAction_(specs[key].unmap(val));
+            } {
+                updateParam.(key, val);
+            };
+        };
+    };
+
+    win = Window("GR-1 Inspired Granular Sampler", Rect(100, 100, 490, 628))
+        .front
+        .alwaysOnTop_(true);
+
+    loadButton = Button(win, Rect(16, 14, 110, 28))
+        .states_([["Load sample"]])
+        .action_({
+            Dialog.openPanel({ |chosen|
+                var oldBuf;
+                path = chosen;
+                oldBuf = buf;
+                buf = Buffer.read(s, path, action: {
+                    {
+                        status.string_("Loaded: " ++ PathName(path).fileName);
+                        sampleNameText.string_(PathName(path).fileName);
+                        if (synth.notNil) { synth.set(\bufnum, buf.bufnum); };
+                        if (oldBuf.notNil) { oldBuf.free; };
+                        loadWaveform.(path);
+                    }.defer;
+                });
+            }, path: Platform.userHomeDir);
+        });
+
+    startButton = Button(win, Rect(136, 14, 82, 28))
+        .states_([["Start"]])
+        .action_({
+            if (synth.isNil) {
+                synth = Synth(\gr1InspiredSampler, values.asPairs ++ [\bufnum, buf.bufnum]);
+                status.string_("Playing");
+            };
+        });
+
+    stopButton = Button(win, Rect(226, 14, 82, 28))
+        .states_([["Stop"]])
+        .action_({
+            if (synth.notNil) {
+                synth.set(\gate, 0);
+                synth = nil;
+                status.string_("Stopped");
+            };
+        });
+
+    presetMenu = PopUpMenu(win, Rect(318, 14, 154, 28))
+        .items_(["CloudPad", "FrozenChoir", "Shards", "SlowScanner", "SubOctaveMist"])
+        .action_({ |menu|
+            applyPreset.(presets[menu.item.asSymbol]);
+        });
+
+    status = StaticText(win, Rect(16, 48, 456, 22))
+        .string_("Loaded default sample. Use Load sample for your own audio.");
+
+    StaticText(win, Rect(16, 78, 456, 18))
+        .string_("Waveform and scan position")
+        .font_(Font.default);
+
+    sampleNameText = StaticText(win, Rect(220, 78, 252, 18))
+        .string_(PathName(defaultPath).fileName)
+        .align_(\right)
+        .font_(Font.default);
+
+    waveformView = UserView(win, Rect(16, 100, 456, 92))
+        .background_(Color(0.08, 0.095, 0.11))
+        .drawFunc_({ |view|
+            var bounds, midY, height, width, x, y, cursor, sprayLeft, sprayRight, scanPos;
+            bounds = view.bounds;
+            width = bounds.width;
+            height = bounds.height;
+            midY = height * 0.5;
+            scanPos = if (values[\freeze] > 0.5) {
+                values[\pos]
+            } {
+                (values[\pos] + scanPhase).wrap(0, 1)
+            };
+
+            Pen.color = Color(0.16, 0.18, 0.2);
+            8.do { |i|
+                y = i.linlin(0, 7, 8, height - 8);
+                Pen.line(Point(0, y), Point(width, y));
+            };
+            Pen.stroke;
+
+            Pen.color = Color(0.46, 0.78, 0.72);
+            Pen.width = 1.2;
+            waveformData.size.do { |i|
+                x = i.linlin(0, waveformData.size - 1, 0, width);
+                y = waveformData[i] * (height * 0.44);
+                Pen.line(Point(x, midY - y), Point(x, midY + y));
+            };
+            Pen.stroke;
+
+            sprayLeft = ((scanPos - values[\spray]).wrap(0, 1) * width);
+            sprayRight = ((scanPos + values[\spray]).wrap(0, 1) * width);
+            Pen.color = Color(0.95, 0.75, 0.24, 0.26);
+            if (sprayLeft <= sprayRight) {
+                Pen.fillRect(Rect(sprayLeft, 0, sprayRight - sprayLeft, height));
+            } {
+                Pen.fillRect(Rect(0, 0, sprayRight, height));
+                Pen.fillRect(Rect(sprayLeft, 0, width - sprayLeft, height));
+            };
+
+            cursor = scanPos * width;
+            Pen.color = Color(1.0, 0.38, 0.26);
+            Pen.width = 2;
+            Pen.line(Point(cursor, 0), Point(cursor, height));
+            Pen.stroke;
+
+            Pen.color = Color(1, 1, 1, 0.72);
+            Pen.stringAtPoint(
+                "pos " ++ scanPos.round(0.001).asString,
+                Point(8, 8),
+                Font.default
+            );
+        });
+
+    makeSlider.(win, "Amp", \amp, ControlSpec(0, 0.8, \lin), 0.35, 210);
+    makeSlider.(win, "Density", \density, ControlSpec(1, 180, \exp), 38, 240);
+    makeSlider.(win, "Grain ms", \grainDur, ControlSpec(0.015, 0.75, \exp), 0.16, 270);
+    makeSlider.(win, "Position", \pos, ControlSpec(0, 1, \lin), 0.35, 300);
+    makeSlider.(win, "Spray", \spray, ControlSpec(0, 0.5, \lin), 0.12, 330);
+    makeSlider.(win, "Scan", \scan, ControlSpec(-0.08, 0.08, \lin), 0.015, 360);
+    makeSlider.(win, "Freeze", \freeze, ControlSpec(0, 1, \lin), 0, 390);
+    makeSlider.(win, "Pitch", \rate, ControlSpec(0.25, 4, \exp), 1, 420);
+    makeSlider.(win, "Pitch spread", \rateSpread, ControlSpec(0, 0.5, \lin), 0.015, 450);
+    makeSlider.(win, "Pan spread", \panSpread, ControlSpec(0, 1, \lin), 0.85, 480);
+    makeSlider.(win, "Filter", \cutoff, ControlSpec(120, 18000, \exp), 12000, 510);
+    makeSlider.(win, "Delay", \delayMix, ControlSpec(0, 1, \lin), 0.12, 540);
+    makeSlider.(win, "Reverb", \reverbMix, ControlSpec(0, 1, \lin), 0.24, 570);
+    makeSlider.(win, "Shimmer", \shimmer, ControlSpec(0, 0.5, \lin), 0, 600);
+
+    loadWaveform.(defaultPath);
+
+    scanRoutine = Routine({
+        loop {
+            0.03.wait;
+            if (values[\freeze] <= 0.5) {
+                scanPhase = (scanPhase + (values[\scan] * 0.03)).wrap(0, 1);
+            };
+            if (waveformView.notNil) { waveformView.refresh; };
+        };
+    }).play(AppClock);
+
+    win.onClose_({
+        if (scanRoutine.notNil) { scanRoutine.stop; };
+        if (synth.notNil) { synth.set(\gate, 0); };
+        if (buf.notNil) { buf.free; };
+    });
+};
+)
