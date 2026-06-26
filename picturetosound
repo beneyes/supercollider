@@ -1,0 +1,1671 @@
+/*
+Visual Ambient System
+SuperCollider patch for image- and text-reactive generative ambient music.
+
+How to perform:
+1. Open this file in SuperCollider.
+2. Update ~imageFolder below if you want to use a different folder.
+3. Evaluate the whole file.
+4. Drop .jpg, .jpeg, .png, .tif, .tiff, or .bmp images into the folder.
+5. Enter painting tags in the small text window, such as:
+   cloudy romantic landscape
+
+The music slowly re-tunes itself to each new image and text tag set.
+*/
+
+(
+s.waitForBoot {
+	~imageFolder = "/Users/beneyes/Documents/Codex/2026-06-12/create-a-generative-music-system-in/incoming_images";
+	~presetFolder = "/Users/beneyes/Documents/Codex/2026-06-12/create-a-generative-music-system-in/outputs/presets";
+	~pollSeconds = 1.0;
+
+	~exts = Set["jpg", "jpeg", "png", "tif", "tiff", "bmp"];
+	~seenImages = Set.new;
+	~lastFeatures = (
+		brightness: 0.5,
+		saturation: 0.25,
+		contrast: 0.25,
+		warmth: 0.5,
+		texture: 0.2,
+		red: 0.5,
+		green: 0.5,
+		blue: 0.5,
+		h1: 0.5,
+		h2: 0.35,
+		h3: 0.25,
+		h4: 0.2,
+		h5: 0.15,
+		h6: 0.12
+	);
+	~tagText = "";
+	~tagAmount = 0.0;
+	~tagMode = \auto;
+	~tagFeatures = ~lastFeatures.copy;
+	~musicFeatures = ~lastFeatures.copy;
+
+	~announce = { |text| ("[visual ambient] " ++ text).postln };
+
+	~asColor = { |pixel|
+		var int, red, green, blue, alpha;
+		if(pixel.isKindOf(Color)) {
+			pixel
+		} {
+			int = pixel.asInteger;
+			alpha = ((int >> 24) & 255) / 255;
+			red = ((int >> 16) & 255) / 255;
+			green = ((int >> 8) & 255) / 255;
+			blue = (int & 255) / 255;
+			Color(red, green, blue, alpha)
+		}
+	};
+
+	~pixelAt = { |image, x, y|
+		var pixel, point;
+		pixel = nil;
+		point = Point(x, y);
+		if(image.respondsTo(\getPixel)) {
+			try {
+				pixel = image.perform(\getPixel, x, y);
+			} {
+				try { pixel = image.perform(\getPixel, point) } { };
+			};
+		};
+		if(pixel.isNil and: { image.respondsTo(\colorAt) }) {
+			try {
+				pixel = image.perform(\colorAt, x, y);
+			} {
+				try { pixel = image.perform(\colorAt, point) } { };
+			};
+		};
+		if(pixel.isNil and: { image.respondsTo(\pixelAt) }) {
+			try {
+				pixel = image.perform(\pixelAt, x, y);
+			} {
+				try { pixel = image.perform(\pixelAt, point) } { };
+			};
+		};
+		if(pixel.isNil) {
+			Color(0.5, 0.5, 0.5)
+		} {
+			~asColor.(pixel)
+		}
+	};
+
+	~blendFeatures = { |imageFeatures, tagFeatures, amount|
+		var out = imageFeatures.copy;
+		[\brightness, \saturation, \contrast, \warmth, \texture, \red, \green, \blue].do { |key|
+			out[key] = ((imageFeatures[key] * (1 - amount)) + (tagFeatures[key] * amount)).clip(0, 1);
+		};
+		[\h1, \h2, \h3, \h4, \h5, \h6].do { |key|
+			out[key] = imageFeatures[key].clip(0, 1);
+		};
+		out
+	};
+
+	~textHas = { |text, fragments|
+		fragments.any { |fragment| text.find(fragment).notNil }
+	};
+
+	~featuresForTags = { |text|
+		var lower, f;
+		lower = text.asString.toLower;
+		f = (
+			brightness: 0.5,
+			saturation: 0.3,
+			contrast: 0.25,
+			warmth: 0.5,
+			texture: 0.25,
+			red: 0.5,
+			green: 0.5,
+			blue: 0.5,
+			h1: 0.5,
+			h2: 0.35,
+			h3: 0.25,
+			h4: 0.2,
+			h5: 0.15,
+			h6: 0.12
+		);
+		~tagMode = \auto;
+
+		if(~textHas.(lower, ["cloud", "mist", "fog", "grey", "gray", "overcast"])) {
+			f[\brightness] = f[\brightness] - 0.18;
+			f[\saturation] = f[\saturation] - 0.1;
+			f[\contrast] = f[\contrast] - 0.08;
+			f[\texture] = f[\texture] + 0.12;
+			f[\blue] = f[\blue] + 0.2;
+			~tagMode = \minor;
+		};
+		if(~textHas.(lower, ["romantic", "tender", "intimate", "lyric", "love"])) {
+			f[\brightness] = f[\brightness] + 0.1;
+			f[\saturation] = f[\saturation] + 0.25;
+			f[\warmth] = f[\warmth] + 0.28;
+			f[\red] = f[\red] + 0.22;
+			f[\contrast] = f[\contrast] - 0.03;
+			~tagMode = \lydian;
+		};
+		if(~textHas.(lower, ["landscape", "pastoral", "field", "hill", "forest", "garden", "river", "sea"])) {
+			f[\brightness] = f[\brightness] + 0.12;
+			f[\saturation] = f[\saturation] + 0.12;
+			f[\texture] = f[\texture] - 0.04;
+			f[\green] = f[\green] + 0.25;
+			~tagMode = \major;
+		};
+		if(~textHas.(lower, ["night", "nocturne", "dark", "shadow", "moon"])) {
+			f[\brightness] = f[\brightness] - 0.25;
+			f[\contrast] = f[\contrast] + 0.08;
+			f[\blue] = f[\blue] + 0.25;
+			~tagMode = \minor;
+		};
+		if(~textHas.(lower, ["storm", "violent", "dramatic", "tempest", "battle"])) {
+			f[\contrast] = f[\contrast] + 0.3;
+			f[\texture] = f[\texture] + 0.32;
+			f[\brightness] = f[\brightness] - 0.05;
+			~tagMode = \minor;
+		};
+		if(~textHas.(lower, ["sun", "gold", "bright", "morning", "joy", "spring"])) {
+			f[\brightness] = f[\brightness] + 0.28;
+			f[\saturation] = f[\saturation] + 0.18;
+			f[\warmth] = f[\warmth] + 0.22;
+			f[\red] = f[\red] + 0.14;
+			f[\green] = f[\green] + 0.1;
+			~tagMode = \major;
+		};
+		if(~textHas.(lower, ["abstract", "cubist", "fragment", "modern", "geometric"])) {
+			f[\contrast] = f[\contrast] + 0.18;
+			f[\texture] = f[\texture] + 0.3;
+			f[\saturation] = f[\saturation] + 0.12;
+			~tagMode = \lydian;
+		};
+		if(~textHas.(lower, ["portrait", "figure", "face", "body", "human"])) {
+			f[\warmth] = f[\warmth] + 0.16;
+			f[\red] = f[\red] + 0.12;
+			f[\contrast] = f[\contrast] + 0.04;
+		};
+		if(~textHas.(lower, ["sacred", "spiritual", "icon", "angel", "church", "cathedral"])) {
+			f[\brightness] = f[\brightness] + 0.16;
+			f[\saturation] = f[\saturation] + 0.08;
+			f[\texture] = f[\texture] - 0.08;
+			~tagMode = \lydian;
+		};
+
+		[\brightness, \saturation, \contrast, \warmth, \texture, \red, \green, \blue].do { |key|
+			f[key] = f[key].clip(0, 1);
+		};
+		f
+	};
+
+	~openImage = { |path|
+		var image;
+		image = nil;
+		try {
+			if(Image.respondsTo(\open)) {
+				image = Image.perform(\open, path);
+			};
+			if(image.isNil) {
+				image = Image.new(path);
+			};
+		} { |error|
+			("[visual ambient] Could not open image: " ++ path).warn;
+			error.reportError;
+		};
+		image
+	};
+
+	~analyzeImage = { |path|
+		var image, width, height, grid, samples;
+		var red, green, blue, lum, lum2, sat, texture, harmonicSeeds;
+		var prevLum, count, features;
+
+		image = ~openImage.(path);
+		if(image.isNil) {
+			nil
+		} {
+			width = image.width.asInteger.max(1);
+			height = image.height.asInteger.max(1);
+			grid = 18;
+			samples = Array.fill(grid * grid, { |i|
+				var gx, gy, x, y, color, luma, maxc, minc;
+				gx = i % grid;
+				gy = (i / grid).floor;
+				x = ((gx + 0.5) / grid * (width - 1)).asInteger.clip(0, width - 1);
+				y = ((gy + 0.5) / grid * (height - 1)).asInteger.clip(0, height - 1);
+				color = ~pixelAt.(image, x, y);
+				luma = (color.red * 0.2126) + (color.green * 0.7152) + (color.blue * 0.0722);
+				maxc = [color.red, color.green, color.blue].maxItem;
+				minc = [color.red, color.green, color.blue].minItem;
+				[color.red, color.green, color.blue, luma, maxc - minc]
+			});
+
+			red = samples.collect({ |v| v[0] }).mean;
+			green = samples.collect({ |v| v[1] }).mean;
+			blue = samples.collect({ |v| v[2] }).mean;
+			lum = samples.collect({ |v| v[3] }).mean;
+			lum2 = samples.collect({ |v| v[3].squared }).mean;
+			sat = samples.collect({ |v| v[4] }).mean;
+			texture = 0;
+			prevLum = samples[0][3];
+			count = 0;
+			samples.do { |v|
+				texture = texture + (v[3] - prevLum).abs;
+				prevLum = v[3];
+				count = count + 1;
+			};
+			texture = (texture / count.max(1)).clip(0, 1);
+			harmonicSeeds = Array.fill(6, { |i|
+				var sample, colorWeight;
+				sample = samples.wrapAt((i * 43) + (width % 17) + (height % 19));
+				colorWeight = [sample[0], sample[1], sample[2]].wrapAt(i);
+				((sample[3] * 0.65) + (colorWeight * 0.35)).clip(0.03, 1)
+			});
+
+			features = (
+				brightness: lum.clip(0, 1),
+				saturation: sat.clip(0, 1),
+				contrast: (lum2 - lum.squared).max(0).sqrt.linlin(0, 0.5, 0, 1).clip(0, 1),
+				warmth: ((red - blue) * 0.5 + 0.5).clip(0, 1),
+				texture: texture.linlin(0, 0.4, 0, 1).clip(0, 1),
+				red: red.clip(0, 1),
+				green: green.clip(0, 1),
+				blue: blue.clip(0, 1),
+				h1: harmonicSeeds[0],
+				h2: harmonicSeeds[1],
+				h3: harmonicSeeds[2],
+				h4: harmonicSeeds[3],
+				h5: harmonicSeeds[4],
+				h6: harmonicSeeds[5]
+			);
+
+			if(image.respondsTo(\free)) { image.free };
+			features
+		}
+	};
+
+	SynthDef(\sh101Voice, { |out = 0, directOut = 0, freq = 110, amp = 0.1, sustain = 1.2, pan = 0,
+		cutoff = 1200, resonance = 0.35, envAmt = 1800, pulseWidth = 0.5, accent = 0.3, glide = 0.04,
+		directAmp = 0.28, attack = 0.01, decay = 0.35, release = 0.45, drift = 0.18, driftRate = 0.07,
+		waveMorph = 0.5, harmonyMix = 0.18, filterMode = 0, filterDrive = 0.25, cutoffLfoDepth = 0.12, cutoffLfoRate = 0.04,
+		cutoffSHDepth = 0.0, cutoffSHRate = 0.035, cutoffSHChance = 0.0,
+		h1 = 0.5, h2 = 0.35, h3 = 0.25, h4 = 0.2, h5 = 0.15, h6 = 0.12|
+		var env, filterEnv, rq, square, saw, sine, osc, sub, noise, harmony, sig, driven, filtered, stereo;
+		var slidFreq, driftCents, driftRatio, cutoffMove, cutoffStep, cutoffStepGate, effectiveCutoff, low, high, notch;
+		driftCents = SinOsc.kr(driftRate.clip(0.01, 0.35), Rand(0, 2pi)).range(drift.neg, drift);
+		driftCents = driftCents + LFNoise2.kr(driftRate.clip(0.01, 0.35) * 0.7).range(drift.neg * 0.45, drift * 0.45);
+		driftRatio = (driftCents / 1200).midiratio;
+		slidFreq = Lag.kr(freq, glide) * driftRatio;
+		env = EnvGen.kr(Env([0, 1, 0.62, 0], [attack.clip(0.005, 4), decay.clip(0.03, 8), release.clip(0.03, 12)], [-3, -4, -5]), doneAction: 2);
+		filterEnv = EnvGen.kr(Env([0, 1, 0], [attack.clip(0.005, 4), decay.clip(0.03, 8) + (release.clip(0.03, 12) * 0.35)], [-3, -4]));
+		square = Pulse.ar(slidFreq, pulseWidth.clip(0.08, 0.92));
+		saw = Saw.ar(slidFreq);
+		sine = SinOsc.ar(slidFreq);
+		osc = SelectX.ar(waveMorph.clip(0, 2), [square, saw, sine]);
+		osc = osc + (SelectX.ar(waveMorph.clip(0, 2), [
+			Pulse.ar(slidFreq * 1.001, pulseWidth.clip(0.08, 0.92)),
+			Saw.ar(slidFreq * 0.999),
+			SinOsc.ar(slidFreq * 1.001)
+		]) * 0.18);
+		harmony = SinOsc.ar(slidFreq * [1.25, 1.333, 1.5, 1.667, 2, 2.5], 0,
+			[h1.clip(0, 1), h2.clip(0, 1), h3.clip(0, 1), h4.clip(0, 1), h5.clip(0, 1), h6.clip(0, 1)] * 0.08).sum;
+		sub = Pulse.ar(slidFreq * 0.5, 0.5) * 0.32;
+		noise = PinkNoise.ar(0.018 * accent);
+		rq = resonance.linlin(0, 1, 0.82, 0.16).clip(0.12, 0.92);
+		sig = (osc * 0.58) + sub + (harmony * harmonyMix.clip(0, 0.85)) + noise;
+		cutoffMove = SinOsc.kr(cutoffLfoRate.clip(0.005, 0.45), Rand(0, 2pi)).range(cutoffLfoDepth.neg, cutoffLfoDepth);
+		cutoffStepGate = Latch.kr(WhiteNoise.kr.abs < cutoffSHChance.clip(0, 1), Impulse.kr(cutoffSHRate.clip(0.008, 0.16))).lag(4);
+		cutoffStep = Latch.kr(WhiteNoise.kr, Impulse.kr(cutoffSHRate.clip(0.008, 0.16))).range(cutoffSHDepth.neg, cutoffSHDepth) * cutoffStepGate;
+		effectiveCutoff = ((cutoff * (2 ** (cutoffMove + cutoffStep))) + (filterEnv * envAmt * (0.2 + (accent * 0.55)))).clip(45, 15000);
+		driven = tanh(sig * (1.0 + (filterDrive.clip(0, 1) * 2.4) + (accent * 0.55)));
+		low = RLPF.ar(driven, effectiveCutoff, rq);
+		high = RHPF.ar(driven, effectiveCutoff, rq);
+		notch = BRF.ar(driven, effectiveCutoff, rq);
+		sig = Select.ar(filterMode.clip(0, 2), [low, high, notch]);
+		sig = tanh(sig * (1.05 + (accent * 0.55)));
+		stereo = Pan2.ar(sig * env * amp * (0.65 + accent), pan);
+		Out.ar(out, stereo);
+		Out.ar(directOut, stereo * directAmp);
+	}).add;
+
+	SynthDef(\ambisonicSpatialFx, { |in = 0, out = 0,
+		grainMix = 0.0, grainSize = 0.14, grainPitch = 0.0, grainPitchDisp = 0.0, grainTimeDisp = 0.0,
+		autoPanMix = 0.35, autoPanDepth = 0.45, autoPanSpeed = 0.08, autoPanShape = 0.0,
+		ambiAngle = 0, ambiRotateRate = 0.025, ambiRotateDepth = 0.65, ambiElevation = 0,
+		mix = 0.45, delay = 0.55, feedback = 0.38, wow = 0.25, tone = 3600, drive = 1.2|
+		var dry, shifted, grain, sig, shapeIndex, panLfo, pan, panned, mono;
+		var angle, rotate, elev, w, x, y, z, encoded, local, delayDrift, delayed, wet;
+		dry = In.ar(in, 2);
+		shifted = PitchShift.ar(
+			dry,
+			grainSize.clip(0.02, 0.6),
+			grainPitch.clip(-24, 24).midiratio,
+			grainPitchDisp.clip(0, 1.0),
+			grainTimeDisp.clip(0, 1.0)
+		);
+		grain = LeakDC.ar(shifted);
+		sig = XFade2.ar(dry, grain, grainMix.linlin(0, 1, -1, 1).clip(-1, 1));
+		shapeIndex = autoPanShape.clip(0, 1) * 2;
+		panLfo = SelectX.kr(shapeIndex, [
+			SinOsc.kr(autoPanSpeed.clip(0.01, 8)),
+			LFTri.kr(autoPanSpeed.clip(0.01, 8)),
+			LFPulse.kr(autoPanSpeed.clip(0.01, 8)).range(-1, 1)
+		]);
+		pan = panLfo * autoPanDepth.clip(0, 1);
+		panned = Pan2.ar(sig.sum * 0.5, pan);
+		sig = XFade2.ar(sig, panned, autoPanMix.linlin(0, 1, -1, 1).clip(-1, 1));
+		mono = sig.sum * 0.5;
+
+		rotate = LFSaw.kr(ambiRotateRate.clip(0.001, 1.2)).range(pi.neg, pi) * ambiRotateDepth.clip(0, 1);
+		angle = (ambiAngle.clip(-180, 180) * pi / 180) + rotate + (pan * pi);
+		elev = ambiElevation.clip(-1, 1) * (pi * 0.5);
+		w = mono * 0.707;
+		x = mono * angle.cos * elev.cos;
+		y = mono * angle.sin * elev.cos;
+		z = mono * elev.sin;
+		encoded = [w, x, y, z];
+
+		local = LocalIn.ar(4);
+		delayDrift = (SinOsc.kr([0.11, 0.13, 0.17, 0.19]).range(-0.018, 0.018)
+			+ LFNoise2.kr(0.5 ! 4).range(-0.008, 0.008)) * wow;
+		delayed = DelayC.ar(encoded + (local * feedback.clip(0, 0.92)), 1.8, (delay + delayDrift).clip(0.04, 1.75));
+		delayed = tanh(delayed * drive.clip(0.5, 2.6));
+		delayed = LPF.ar(HPF.ar(delayed, 60), tone.clip(500, 9500));
+		LocalOut.ar(delayed);
+		wet = XFade2.ar(encoded, delayed, mix.linlin(0, 1, -1, 1).clip(-1, 1));
+		Out.ar(out, LeakDC.ar(wet));
+	}).add;
+
+	SynthDef(\binauralDecode, { |in = 0, out = 0, width = 0.78, earDelay = 0.00055, level = 0.9|
+		var b, w, x, y, z, sideLate, height, left, right;
+		b = In.ar(in, 4);
+		w = b[0];
+		x = b[1];
+		y = b[2];
+		z = b[3];
+		sideLate = DelayC.ar(y, 0.012, earDelay.clip(0, 0.01));
+		height = BPF.ar(z, 1800, 0.8) * 0.18;
+		left = (w * 0.72) + (x * 0.42) + (y * width.clip(0, 1.4) * 0.56) + (sideLate * 0.24) + height;
+		right = (w * 0.72) + (x * 0.42) - (y * width.clip(0, 1.4) * 0.56) - (sideLate * 0.24) - height;
+		Out.ar(out, Limiter.ar(LeakDC.ar([left, right]) * level.clip(0, 1.4), 0.95));
+	}).add;
+
+	SynthDef(\stringDrone, { |out = 0, freq = 110, amp = 0.035, gate = 1,
+		brightness = 0.5, texture = 0.25, warmth = 0.5, drift = 2.0|
+		var trig, excite, ratios, freqs, coef, decay, driftRatio, strings, env, sig;
+		ratios = [1, 1.5, 2, 2.01];
+		driftRatio = SinOsc.kr([0.021, 0.027, 0.033, 0.041]).range(drift.neg, drift);
+		driftRatio = (driftRatio / 1200).midiratio;
+		freqs = (freq * ratios * driftRatio).clip(35, 5000);
+		trig = Dust.kr(texture.linlin(0, 1, 0.08, 0.55) ! 4);
+		excite = PinkNoise.ar(0.18 ! 4) * Decay2.kr(trig, 0.01, texture.linlin(0, 1, 1.8, 0.45));
+		coef = warmth.linlin(0, 1, 0.28, 0.72);
+		decay = brightness.linlin(0, 1, 9, 22);
+		strings = Pluck.ar(excite, trig, 0.08, freqs.reciprocal, decay, coef);
+		sig = Splay.ar(strings, 0.7);
+		sig = LPF.ar(sig, brightness.linexp(0, 1, 900, 6200));
+		env = EnvGen.kr(Env.asr(8, 1, 12), gate, doneAction: 2);
+		Out.ar(out, sig * env * amp);
+	}).add;
+
+	s.sync;
+
+	~synthBus = Bus.audio(s, 2);
+	~ambiBus = Bus.audio(s, 4);
+	~grainPan = Synth.tail(s, \ambisonicSpatialFx, [\in, ~synthBus.index, \out, ~ambiBus.index]);
+	~binaural = Synth.tail(s, \binauralDecode, [\in, ~ambiBus.index, \out, 0]);
+	~drone = Synth.tail(s, \stringDrone, [\out, 0]);
+	~controlUpdater = {
+		var f = ~musicFeatures, image = ~lastFeatures;
+		~cutoff = image[\brightness].linexp(0, 1, 85, 9800)
+			* image[\saturation].linlin(0, 1, 0.58, 1.34)
+			* f[\warmth].linlin(0, 1, 0.92, 1.12);
+		~resonance = image[\contrast].linlin(0, 1, 0.12, 0.62)
+			+ f[\texture].linlin(0, 1, 0, 0.08);
+		~envAmt = f[\texture].linexp(0, 1, 420, 2850);
+		~pulseWidth = f[\warmth].linlin(0, 1, 0.28, 0.72);
+		~targetAttack = image[\saturation].linexp(0, 1, 0.025, 1.85)
+			* f[\brightness].linlin(0, 1, 1.2, 0.72)
+			* f[\texture].linlin(0, 1, 1.1, 0.78);
+		~targetDecay = f[\contrast].linlin(0, 1, 1.8, 0.24) * f[\saturation].linlin(0, 1, 1.15, 0.75);
+		~targetRelease = f[\blue].linlin(0, 1, 0.35, 3.6)
+			* image[\saturation].linlin(0, 1, 0.82, 1.45)
+			* f[\brightness].linlin(0, 1, 1.25, 0.82);
+		~targetDrift = f[\texture].linlin(0, 1, 1.8, 8.5) * f[\contrast].linlin(0, 1, 0.75, 1.4);
+		~targetDriftRate = f[\brightness].linlin(0, 1, 0.035, 0.12);
+		~targetNoteDur = f[\texture].linlin(0, 1, 1.75, 0.48) * f[\brightness].linlin(0, 1, 1.22, 0.82);
+		~targetDelayFeedback = f[\saturation].linlin(0, 1, 0.22, 0.62)
+			+ f[\contrast].linlin(0, 1, -0.04, 0.08)
+			+ f[\blue].linlin(0, 1, 0.0, 0.08);
+		~targetWaveMorph = f[\warmth].linlin(0, 1, 0.15, 1.75)
+			+ f[\brightness].linlin(0, 1, -0.15, 0.25)
+			- f[\contrast].linlin(0, 1, 0, 0.25);
+		~targetHarmonyMix = f[\saturation].linlin(0, 1, 0.08, 0.48)
+			+ f[\texture].linlin(0, 1, 0, 0.18);
+		~targetFilterDrive = f[\contrast].linlin(0, 1, 0.08, 0.46)
+			+ f[\saturation].linlin(0, 1, 0, 0.1);
+		~targetCutoffLfoDepth = f[\texture].linlin(0, 1, 0.05, 0.42)
+			+ f[\blue].linlin(0, 1, 0, 0.12);
+		~targetCutoffLfoRate = f[\brightness].linlin(0, 1, 0.018, 0.09)
+			+ f[\texture].linlin(0, 1, 0, 0.055);
+		~targetCutoffSHDepth = f[\texture].linlin(0, 1, 0.0, 0.48)
+			+ f[\contrast].linlin(0, 1, 0, 0.18);
+		~targetCutoffSHRate = f[\brightness].linlin(0, 1, 0.018, 0.055)
+			+ f[\texture].linlin(0, 1, 0, 0.035);
+		~targetCutoffSHChance = f[\texture].linlin(0, 1, 0.08, 0.38)
+			+ f[\contrast].linlin(0, 1, 0, 0.22);
+		~targetGrainMix = f[\texture].linlin(0, 1, 0.02, 0.36)
+			+ f[\blue].linlin(0, 1, 0, 0.16);
+		~targetGrainSize = f[\brightness].linexp(0, 1, 0.32, 0.055)
+			* f[\texture].linlin(0, 1, 1.25, 0.72);
+		~targetGrainPitch = f[\warmth].linlin(0, 1, -7, 7)
+			+ f[\contrast].linlin(0, 1, 0, -5);
+		~targetGrainPitchDisp = f[\texture].linlin(0, 1, 0.01, 0.28);
+		~targetGrainTimeDisp = f[\texture].linlin(0, 1, 0.01, 0.22)
+			+ f[\blue].linlin(0, 1, 0, 0.16);
+		~targetAutoPanMix = f[\texture].linlin(0, 1, 0.14, 0.48)
+			+ f[\contrast].linlin(0, 1, 0, 0.18);
+		~targetAutoPanDepth = f[\red].linlin(0, 1, 0.18, 0.72)
+			+ f[\contrast].linlin(0, 1, 0, 0.18);
+		~targetAutoPanSpeed = f[\texture].linexp(0, 1, 0.025, 0.42)
+			* f[\brightness].linlin(0, 1, 0.85, 1.2);
+		~targetAutoPanShape = f[\contrast].linlin(0, 1, 0.0, 0.78);
+		~targetAmbiAngle = (f[\red] - f[\blue]).linlin(-1, 1, -135, 135);
+		~targetAmbiRotateRate = f[\texture].linexp(0, 1, 0.006, 0.18)
+			* f[\contrast].linlin(0, 1, 0.75, 1.8);
+		~targetAmbiRotateDepth = f[\contrast].linlin(0, 1, 0.18, 0.95);
+		~targetAmbiElevation = f[\brightness].linlin(0, 1, -0.25, 0.32)
+			+ f[\blue].linlin(0, 1, 0, 0.18);
+		~targetBinauralWidth = f[\saturation].linlin(0, 1, 0.55, 1.18)
+			+ f[\contrast].linlin(0, 1, 0, 0.16);
+		~targetBinauralEarDelay = f[\texture].linlin(0, 1, 0.00032, 0.00125);
+		~targetBinauralLevel = f[\brightness].linlin(0, 1, 0.82, 1.02);
+		~targetTempo = f[\texture].linlin(0, 1, 0.86, 1.18)
+			* f[\brightness].linlin(0, 1, 0.92, 1.08);
+		if(~tagMode == \minor) {
+			~targetAttack = ~targetAttack * 1.45;
+			~targetRelease = ~targetRelease * 1.35;
+			~targetDrift = ~targetDrift * 1.25;
+			~targetNoteDur = ~targetNoteDur * 1.18;
+			~targetDelayFeedback = ~targetDelayFeedback + 0.06;
+			~targetWaveMorph = ~targetWaveMorph + 0.25;
+			~targetCutoffLfoDepth = ~targetCutoffLfoDepth + 0.08;
+			~targetCutoffSHDepth = ~targetCutoffSHDepth + 0.08;
+			~targetCutoffSHChance = ~targetCutoffSHChance + 0.08;
+			~targetGrainMix = ~targetGrainMix + 0.14;
+			~targetGrainSize = ~targetGrainSize * 1.35;
+			~targetGrainPitch = ~targetGrainPitch - 5;
+			~targetAutoPanSpeed = ~targetAutoPanSpeed * 0.72;
+			~targetAmbiRotateRate = ~targetAmbiRotateRate * 0.66;
+			~targetAmbiRotateDepth = ~targetAmbiRotateDepth + 0.12;
+			~targetBinauralWidth = ~targetBinauralWidth + 0.1;
+			~targetTempo = ~targetTempo * 0.88;
+		};
+		if(~tagMode == \lydian) {
+			~targetDecay = ~targetDecay * 1.25;
+			~targetRelease = ~targetRelease * 1.2;
+			~targetDrift = ~targetDrift * 0.85;
+			~targetDelayFeedback = ~targetDelayFeedback + 0.04;
+			~targetHarmonyMix = ~targetHarmonyMix + 0.1;
+			~targetFilterDrive = ~targetFilterDrive + 0.03;
+			~targetCutoffSHRate = ~targetCutoffSHRate * 0.82;
+			~targetGrainPitch = ~targetGrainPitch + 7;
+			~targetAutoPanDepth = ~targetAutoPanDepth + 0.12;
+			~targetAmbiAngle = ~targetAmbiAngle + 45;
+			~targetAmbiElevation = ~targetAmbiElevation + 0.12;
+			~targetTempo = ~targetTempo * 1.05;
+		};
+		~targetAttack = ~targetAttack.clip(0.008, 3.6);
+		~targetDecay = ~targetDecay.clip(0.08, 4.8);
+		~targetRelease = ~targetRelease.clip(0.08, 6.5);
+		~targetDrift = ~targetDrift.clip(0.4, 14);
+		~targetDriftRate = ~targetDriftRate.clip(0.015, 0.18);
+		~targetNoteDur = ~targetNoteDur.clip(0.28, 3.2);
+		~targetDelayFeedback = ~targetDelayFeedback.clip(0.16, 0.78);
+		~targetWaveMorph = ~targetWaveMorph.clip(0, 2);
+		~targetHarmonyMix = ~targetHarmonyMix.clip(0.04, 0.72);
+		~targetFilterDrive = ~targetFilterDrive.clip(0.03, 0.62);
+		~targetCutoffLfoDepth = ~targetCutoffLfoDepth.clip(0.02, 0.65);
+		~targetCutoffLfoRate = ~targetCutoffLfoRate.clip(0.008, 0.18);
+		~targetCutoffSHDepth = ~targetCutoffSHDepth.clip(0, 0.74);
+		~targetCutoffSHRate = ~targetCutoffSHRate.clip(0.012, 0.09);
+		~targetCutoffSHChance = ~targetCutoffSHChance.clip(0.03, 0.62);
+		~targetGrainMix = ~targetGrainMix.clip(0, 0.78);
+		~targetGrainSize = ~targetGrainSize.clip(0.02, 0.6);
+		~targetGrainPitch = ~targetGrainPitch.clip(-24, 24);
+		~targetGrainPitchDisp = ~targetGrainPitchDisp.clip(0, 0.75);
+		~targetGrainTimeDisp = ~targetGrainTimeDisp.clip(0, 0.75);
+		~targetAutoPanMix = ~targetAutoPanMix.clip(0, 0.85);
+		~targetAutoPanDepth = ~targetAutoPanDepth.clip(0, 1);
+		~targetAutoPanSpeed = ~targetAutoPanSpeed.clip(0.01, 8);
+		~targetAutoPanShape = ~targetAutoPanShape.clip(0, 1);
+		~targetAmbiAngle = ~targetAmbiAngle.wrap(-180, 180);
+		~targetAmbiRotateRate = ~targetAmbiRotateRate.clip(0.001, 1.2);
+		~targetAmbiRotateDepth = ~targetAmbiRotateDepth.clip(0, 1);
+		~targetAmbiElevation = ~targetAmbiElevation.clip(-1, 1);
+		~targetBinauralWidth = ~targetBinauralWidth.clip(0, 1.4);
+		~targetBinauralEarDelay = ~targetBinauralEarDelay.clip(0, 0.01);
+		~targetBinauralLevel = ~targetBinauralLevel.clip(0, 1.4);
+		~targetTempo = ~targetTempo.clip(0.62, 1.42);
+		~tapeMix = f[\blue].linlin(0, 1, 0.28, 0.62);
+		~tapeDelayTime = f[\texture].linlin(0, 1, 0.82, 0.28);
+		~tapeWow = f[\contrast].linlin(0, 1, 0.12, 0.75);
+		~tapeTone = f[\brightness].linexp(0, 1, 1200, 7600);
+		~tapeDrive = f[\warmth].linlin(0, 1, 1.05, 1.8);
+		~grainPan.set(
+			\mix, ~tapeMix,
+			\delay, ~tapeDelayTime,
+			\feedback, ~delayFeedback,
+			\wow, ~tapeWow,
+			\tone, ~tapeTone,
+			\drive, ~tapeDrive
+		);
+		if(~drone.notNil) {
+			~drone.set(
+				\brightness, f[\brightness],
+				\texture, f[\texture],
+				\warmth, f[\warmth],
+				\drift, ~drift,
+				\amp, f[\brightness].linlin(0, 1, 0.022, 0.045)
+			);
+		};
+	};
+
+	~scaleForFeatures = {
+		var f = ~musicFeatures, root, scale;
+		root = f[\warmth].linlin(0, 1, 38, 50).round(1);
+		scale = if(~tagMode == \minor) {
+			[0, 3, 5, 7, 10]
+		} {
+			if(~tagMode == \major) {
+				[0, 2, 4, 7, 9]
+			} {
+				if(~tagMode == \lydian) {
+					[0, 2, 4, 6, 7, 9, 11]
+				} {
+					if(f[\saturation] > 0.45) {
+						[0, 2, 4, 6, 7, 9, 11]
+					} {
+						if(f[\brightness] < 0.35) { [0, 3, 5, 7, 10] } { [0, 2, 4, 7, 9] }
+					}
+				}
+			}
+		};
+		[root, scale]
+	};
+
+	~makeMotif = {
+		var f = ~musicFeatures, contour, lift, turn;
+		contour = if(~tagMode == \minor) {
+			[0, 1, 2, 3, 2, 1, 0, 1]
+		} {
+			if(~tagMode == \lydian) {
+				[0, 2, 4, 6, 5, 4, 2, 1]
+			} {
+				if(f[\brightness] > 0.58) {
+					[0, 2, 4, 5, 4, 2, 1, 0]
+				} {
+					if(f[\warmth] > 0.55) {
+						[0, 1, 3, 4, 5, 4, 2, 1]
+					} {
+						[0, 1, 2, 4, 2, 1, 0, 1]
+					}
+				}
+			}
+		};
+		lift = f[\saturation].linlin(0, 1, 0, 3).round(1).asInteger;
+		turn = f[\texture].linlin(0, 1, 0, 2).round(1).asInteger;
+		contour.collect { |degree, i|
+			degree + (if((i + turn) % 4 == 0) { lift } { 0 })
+		}
+	};
+
+	~degreeToSemitone = { |degree, scale|
+		var size, safeDegree, octave, index;
+		size = scale.size.max(1);
+		safeDegree = degree.asInteger.max(0);
+		octave = (safeDegree / size).floor;
+		index = safeDegree % size;
+		scale.wrapAt(index) + (12 * octave)
+	};
+
+	~updateDroneKey = {
+		var scaleInfo, root, f;
+		if(~drone.notNil) {
+			f = ~musicFeatures;
+			scaleInfo = ~scaleForFeatures.();
+			root = scaleInfo[0];
+			~drone.set(
+				\freq, (root + 12).midicps,
+				\brightness, f[\brightness],
+				\texture, f[\texture],
+				\warmth, f[\warmth],
+				\drift, ~drift,
+				\amp, f[\brightness].linlin(0, 1, 0.022, 0.045)
+			);
+		};
+	};
+
+	~rebuildMusicState = {
+		~musicFeatures = ~blendFeatures.(~lastFeatures, ~tagFeatures, ~tagAmount);
+		~currentMotif = ~makeMotif.();
+		~randomOrder = (0 .. (~currentMotif.size - 1)).scramble;
+		~pseudoOrder = (0 .. (~currentMotif.size - 1)).scramble;
+		~controlUpdater.();
+		~updateDroneKey.();
+	};
+
+	~applyTags = { |text|
+		~tagText = text.asString;
+		~tagAmount = if(~tagText.size > 0) { 0.72 } { 0.0 };
+		~tagFeatures = ~featuresForTags.(~tagText);
+		~rebuildMusicState.();
+		~announce.("tags: " ++ if(~tagText.size > 0) { ~tagText } { "(cleared)" }
+			++ " | mode " ++ ~tagMode
+			++ " | brightness " ++ ~musicFeatures[\brightness].round(0.01)
+			++ " | saturation " ++ ~musicFeatures[\saturation].round(0.01)
+			++ " | texture " ++ ~musicFeatures[\texture].round(0.01)
+			++ " | env " ++ ~targetAttack.round(0.01) ++ "/"
+			++ ~targetDecay.round(0.01) ++ "/"
+			++ ~targetRelease.round(0.01)
+			++ " | drift " ++ ~targetDrift.round(0.1)
+			++ " | noteDur " ++ ~targetNoteDur.round(0.01)
+			++ " | feedback " ++ ~targetDelayFeedback.round(0.01)
+			++ " | wave " ++ ~targetWaveMorph.round(0.01)
+			++ " | harm " ++ ~targetHarmonyMix.round(0.01)
+			++ " | filter " ++ ~filterModeName
+			++ " | drive " ++ ~targetFilterDrive.round(0.01)
+			++ " | lfo " ++ ~targetCutoffLfoDepth.round(0.01)
+			++ " | s+h " ++ ~targetCutoffSHDepth.round(0.01)
+			++ " | grain " ++ ~targetGrainMix.round(0.01)
+			++ " | pan " ++ ~targetAutoPanDepth.round(0.01)
+			++ " | ambi " ++ ~targetAmbiAngle.round(1) ++ "/"
+			++ ~targetAmbiRotateDepth.round(0.01)
+			++ " | tempo " ++ ~targetTempo.round(0.01)
+		);
+	};
+
+	~presetKeys = [
+		\cutoff, \resonance, \envAmt, \pulseWidth,
+		\targetAttack, \targetDecay, \targetRelease,
+		\targetDrift, \targetDriftRate, \targetNoteDur, \targetDelayFeedback,
+		\tapeMix, \tapeDelayTime, \tapeWow, \tapeTone, \tapeDrive,
+		\targetWaveMorph, \targetHarmonyMix, \targetFilterDrive,
+		\targetCutoffLfoDepth, \targetCutoffLfoRate, \targetCutoffSHDepth, \targetCutoffSHRate, \targetCutoffSHChance,
+		\targetGrainMix, \targetGrainSize, \targetGrainPitch, \targetGrainPitchDisp, \targetGrainTimeDisp,
+		\targetAutoPanMix, \targetAutoPanDepth, \targetAutoPanSpeed, \targetAutoPanShape,
+		\targetAmbiAngle, \targetAmbiRotateRate, \targetAmbiRotateDepth, \targetAmbiElevation,
+		\targetBinauralWidth, \targetBinauralEarDelay, \targetBinauralLevel,
+		\targetTempo, \tagAmount, \filterMode, \arpMode, \arpSpeedMode
+	];
+
+	~valueForPreset = { |key|
+		currentEnvironment[key]
+	};
+
+	~coercePresetValue = { |key, text|
+		var value;
+		if([\arpMode, \arpSpeedMode].includes(key)) {
+			text.asSymbol
+		} {
+			value = text.asFloat;
+			if(key == \filterMode) { value.asInteger } { value }
+		}
+	};
+
+	~presetNameToPath = { |name|
+		var safe;
+		safe = name.asString.stripWhiteSpace;
+		if(safe.size <= 0) { safe = "visual_ambient_preset" };
+		safe = safe.replace(" ", "_").replace("/", "_").replace(":", "_");
+		~presetFolder +/+ safe ++ ".txt"
+	};
+
+	~presetFiles = {
+		if(File.exists(~presetFolder).not) {
+			("mkdir -p " ++ ~presetFolder.quote).unixCmdGetStdOut;
+		};
+		PathName(~presetFolder).files.select { |path|
+			path.extension.asString.toLower == "txt"
+		}.sort { |a, b| a.fileName < b.fileName }
+	};
+
+	~refreshPresetMenu = {
+		var files, names;
+		if(~controlGui.notNil and: { ~controlGui[\presetMenu].notNil }) {
+			files = ~presetFiles.();
+			names = files.collect { |path| path.fileNameWithoutExtension };
+			if(names.isEmpty) { names = ["(no presets saved)"] };
+			{
+				~controlGuiUpdating = true;
+				~controlGui[\presetMenu].items = names;
+				~controlGui[\presetMenu].value = 0;
+				~controlGuiUpdating = false;
+			}.defer;
+		};
+	};
+
+	~pushRecalledControls = {
+		~attack = ~targetAttack;
+		~decay = ~targetDecay;
+		~release = ~targetRelease;
+		~drift = ~targetDrift;
+		~driftRate = ~targetDriftRate;
+		~noteDur = ~targetNoteDur;
+		~delayFeedback = ~targetDelayFeedback;
+		~waveMorph = ~targetWaveMorph;
+		~harmonyMix = ~targetHarmonyMix;
+		~filterDrive = ~targetFilterDrive;
+		~cutoffLfoDepth = ~targetCutoffLfoDepth;
+		~cutoffLfoRate = ~targetCutoffLfoRate;
+		~cutoffSHDepth = ~targetCutoffSHDepth;
+		~cutoffSHRate = ~targetCutoffSHRate;
+		~cutoffSHChance = ~targetCutoffSHChance;
+		~grainMix = ~targetGrainMix;
+		~grainSize = ~targetGrainSize;
+		~grainPitch = ~targetGrainPitch;
+		~grainPitchDisp = ~targetGrainPitchDisp;
+		~grainTimeDisp = ~targetGrainTimeDisp;
+		~autoPanMix = ~targetAutoPanMix;
+		~autoPanDepth = ~targetAutoPanDepth;
+		~autoPanSpeed = ~targetAutoPanSpeed;
+		~autoPanShape = ~targetAutoPanShape;
+		~ambiAngle = ~targetAmbiAngle;
+		~ambiRotateRate = ~targetAmbiRotateRate;
+		~ambiRotateDepth = ~targetAmbiRotateDepth;
+		~ambiElevation = ~targetAmbiElevation;
+		~binauralWidth = ~targetBinauralWidth;
+		~binauralEarDelay = ~targetBinauralEarDelay;
+		~binauralLevel = ~targetBinauralLevel;
+		~tempo = ~targetTempo;
+		~filterModeName = [\lowpass, \highpass, \notch].wrapAt(~filterMode.asInteger.clip(0, 2));
+		if(~grainPan.notNil) {
+			~grainPan.set(
+				\grainMix, ~grainMix,
+				\grainSize, ~grainSize,
+				\grainPitch, ~grainPitch,
+				\grainPitchDisp, ~grainPitchDisp,
+				\grainTimeDisp, ~grainTimeDisp,
+				\autoPanMix, ~autoPanMix,
+				\autoPanDepth, ~autoPanDepth,
+				\autoPanSpeed, ~autoPanSpeed,
+				\autoPanShape, ~autoPanShape,
+				\ambiAngle, ~ambiAngle,
+				\ambiRotateRate, ~ambiRotateRate,
+				\ambiRotateDepth, ~ambiRotateDepth,
+				\ambiElevation, ~ambiElevation,
+				\mix, ~tapeMix,
+				\delay, ~tapeDelayTime,
+				\feedback, ~delayFeedback,
+				\wow, ~tapeWow,
+				\tone, ~tapeTone,
+				\drive, ~tapeDrive
+			);
+		};
+		if(~binaural.notNil) {
+			~binaural.set(
+				\width, ~binauralWidth,
+				\earDelay, ~binauralEarDelay,
+				\level, ~binauralLevel
+			);
+		};
+		~updateDroneKey.();
+		~updateControlGui.();
+	};
+
+	~savePreset = { |name = "visual_ambient_preset"|
+		var path, file;
+		if(File.exists(~presetFolder).not) {
+			("mkdir -p " ++ ~presetFolder.quote).unixCmdGetStdOut;
+		};
+		path = ~presetNameToPath.(name);
+		file = File(path, "w");
+		file.write("# Visual Ambient preset\n");
+		file.write("# one key=value pair per line\n");
+		~presetKeys.do { |key|
+			file.write(key.asString ++ "=" ++ ~valueForPreset.(key).asString ++ "\n");
+		};
+		file.close;
+		~announce.("saved preset: " ++ path);
+		~refreshPresetMenu.();
+		path
+	};
+
+	~loadPreset = { |nameOrPath|
+		var path, file, lines, parts, key, value;
+		path = if(nameOrPath.asString.endsWith(".txt")) {
+			nameOrPath.asString
+		} {
+			~presetNameToPath.(nameOrPath)
+		};
+		if(File.exists(path).not) {
+			~announce.("preset not found: " ++ path);
+		} {
+			file = File(path, "r");
+			lines = file.readAllString.split($\n);
+			file.close;
+			lines.do { |line|
+				if((line.size > 0) and: { line.beginsWith("#").not and: { line.includes($=) } }) {
+					parts = line.split($=);
+					key = parts[0].stripWhiteSpace.asSymbol;
+					if(~presetKeys.includes(key)) {
+						value = parts[1].stripWhiteSpace;
+						currentEnvironment[key] = ~coercePresetValue.(key, value);
+					};
+				};
+			};
+			~pushRecalledControls.();
+			~announce.("loaded preset: " ++ path);
+		};
+	};
+
+	~randomisePreset = {
+		~cutoff = rrand(0.0, 1.0).linexp(0, 1, 70, 12000);
+		~resonance = rrand(0.05, 0.72);
+		~envAmt = rrand(250, 4600);
+		~pulseWidth = rrand(0.12, 0.88);
+		~targetAttack = rrand(0.0, 1.0).linexp(0, 1, 0.008, 3.4);
+		~targetDecay = rrand(0.08, 4.8);
+		~targetRelease = rrand(0.08, 8.5);
+		~targetDrift = rrand(0.3, 18.0);
+		~targetDriftRate = rrand(0.012, 0.18);
+		~targetNoteDur = rrand(0.24, 4.8);
+		~targetDelayFeedback = rrand(0.12, 0.82);
+		~tapeMix = rrand(0.16, 0.72);
+		~tapeDelayTime = rrand(0.12, 1.35);
+		~tapeWow = rrand(0.04, 0.88);
+		~tapeTone = rrand(0.0, 1.0).linexp(0, 1, 650, 8800);
+		~tapeDrive = rrand(0.75, 2.15);
+		~targetWaveMorph = rrand(0.0, 2.0);
+		~targetHarmonyMix = rrand(0.03, 0.78);
+		~targetFilterDrive = rrand(0.02, 0.85);
+		~targetCutoffLfoDepth = rrand(0.0, 0.78);
+		~targetCutoffLfoRate = rrand(0.006, 0.22);
+		~targetCutoffSHDepth = rrand(0.0, 0.86);
+		~targetCutoffSHRate = rrand(0.01, 0.14);
+		~targetCutoffSHChance = rrand(0.0, 0.82);
+		~targetGrainMix = rrand(0.0, 0.85);
+		~targetGrainSize = rrand(0.02, 0.6);
+		~targetGrainPitch = rrand(-24.0, 24.0).round(0.01);
+		~targetGrainPitchDisp = rrand(0.0, 0.82);
+		~targetGrainTimeDisp = rrand(0.0, 0.82);
+		~targetAutoPanMix = rrand(0.0, 0.92);
+		~targetAutoPanDepth = rrand(0.0, 1.0);
+		~targetAutoPanSpeed = rrand(0.0, 1.0).linexp(0, 1, 0.015, 3.5);
+		~targetAutoPanShape = rrand(0.0, 1.0);
+		~targetAmbiAngle = rrand(-180.0, 180.0);
+		~targetAmbiRotateRate = rrand(0.0, 1.0).linexp(0, 1, 0.002, 0.55);
+		~targetAmbiRotateDepth = rrand(0.0, 1.0);
+		~targetAmbiElevation = rrand(-0.55, 0.55);
+		~targetBinauralWidth = rrand(0.35, 1.25);
+		~targetBinauralEarDelay = rrand(0.00015, 0.0018);
+		~targetBinauralLevel = rrand(0.72, 1.08);
+		~targetTempo = rrand(0.58, 1.48);
+		~tagAmount = rrand(0.0, 1.0);
+		~filterMode = [0, 1, 2].choose;
+		~filterModeName = [\lowpass, \highpass, \notch].wrapAt(~filterMode);
+		~arpMode = ~arpModes.choose;
+		~arpSpeedMode = ~arpSpeedModes.choose;
+		~arpModeStep = 0;
+		~pseudoRhythmStep = 0;
+		~randomOrder = (0 .. (~currentMotif.size - 1)).scramble;
+		~pseudoOrder = (0 .. (~currentMotif.size - 1)).scramble;
+		~pushRecalledControls.();
+		~announce.("randomised synth parameters");
+	};
+
+	~attack = 0.04;
+	~decay = 0.45;
+	~release = 0.65;
+	~targetAttack = ~attack;
+	~targetDecay = ~decay;
+	~targetRelease = ~release;
+	~drift = 2.5;
+	~driftRate = 0.06;
+	~targetDrift = ~drift;
+	~targetDriftRate = ~driftRate;
+	~noteDur = 1.0;
+	~targetNoteDur = ~noteDur;
+	~delayFeedback = 0.38;
+	~targetDelayFeedback = ~delayFeedback;
+	~waveMorph = 0.35;
+	~voiceWaveMorph = ~waveMorph;
+	~wavePhase = 0;
+	~targetWaveMorph = ~waveMorph;
+	~harmonyMix = 0.18;
+	~targetHarmonyMix = ~harmonyMix;
+	~filterDrive = 0.25;
+	~targetFilterDrive = ~filterDrive;
+	~cutoffLfoDepth = 0.12;
+	~targetCutoffLfoDepth = ~cutoffLfoDepth;
+	~cutoffLfoRate = 0.04;
+	~targetCutoffLfoRate = ~cutoffLfoRate;
+	~cutoffSHDepth = 0.0;
+	~targetCutoffSHDepth = ~cutoffSHDepth;
+	~cutoffSHRate = 0.035;
+	~targetCutoffSHRate = ~cutoffSHRate;
+	~cutoffSHChance = 0.12;
+	~targetCutoffSHChance = ~cutoffSHChance;
+	~grainMix = 0.0;
+	~targetGrainMix = ~grainMix;
+	~grainSize = 0.14;
+	~targetGrainSize = ~grainSize;
+	~grainPitch = 0.0;
+	~targetGrainPitch = ~grainPitch;
+	~grainPitchDisp = 0.02;
+	~targetGrainPitchDisp = ~grainPitchDisp;
+	~grainTimeDisp = 0.02;
+	~targetGrainTimeDisp = ~grainTimeDisp;
+	~autoPanMix = 0.35;
+	~targetAutoPanMix = ~autoPanMix;
+	~autoPanDepth = 0.45;
+	~targetAutoPanDepth = ~autoPanDepth;
+	~autoPanSpeed = 0.08;
+	~targetAutoPanSpeed = ~autoPanSpeed;
+	~autoPanShape = 0.0;
+	~targetAutoPanShape = ~autoPanShape;
+	~ambiAngle = 0.0;
+	~targetAmbiAngle = ~ambiAngle;
+	~ambiRotateRate = 0.025;
+	~targetAmbiRotateRate = ~ambiRotateRate;
+	~ambiRotateDepth = 0.65;
+	~targetAmbiRotateDepth = ~ambiRotateDepth;
+	~ambiElevation = 0.0;
+	~targetAmbiElevation = ~ambiElevation;
+	~binauralWidth = 0.78;
+	~targetBinauralWidth = ~binauralWidth;
+	~binauralEarDelay = 0.00055;
+	~targetBinauralEarDelay = ~binauralEarDelay;
+	~binauralLevel = 0.9;
+	~targetBinauralLevel = ~binauralLevel;
+	~filterMode = 0;
+	~filterModeName = \lowpass;
+	~filterModeChangeEvery = 20;
+	~tempo = 1.0;
+	~targetTempo = ~tempo;
+	~tempoPhase = 0;
+	~tempoWander = 1.0;
+	~arpPitchHistory = List.new;
+	~currentMotif = ~makeMotif.();
+	~arpMode = \up;
+	~arpModeStep = 0;
+	~arpDirection = 1;
+	~arpModeChangeEvery = 16;
+	~arpModes = [\up, \down, \pingpong, \random, \pseudoRandom];
+	~arpSpeedMode = \normal;
+	~arpSpeedModes = [\half, \normal, \double, \triplet, \pseudoRhythm];
+	~arpSpeedChangeEvery = 12;
+	~pseudoRhythmPattern = [1, 0.5, 1.5, 0.75, 1, 0.5, 2, 0.75];
+	~pseudoRhythmStep = 0;
+	~randomOrder = (0 .. (~currentMotif.size - 1)).scramble;
+	~pseudoOrder = (0 .. (~currentMotif.size - 1)).scramble;
+	~controlUpdater.();
+	~updateDroneKey.();
+
+	~evolveEnvelope = {
+		~attack = (~attack * 0.95) + (~targetAttack * 0.05);
+		~decay = (~decay * 0.9) + (~targetDecay * 0.1);
+		~release = (~release * 0.95) + (~targetRelease * 0.05);
+		~drift = (~drift * 0.94) + (~targetDrift * 0.06);
+		~driftRate = (~driftRate * 0.94) + (~targetDriftRate * 0.06);
+		~noteDur = (~noteDur * 0.9) + (~targetNoteDur * 0.1);
+		~delayFeedback = (~delayFeedback * 0.92) + (~targetDelayFeedback * 0.08);
+		~waveMorph = (~waveMorph * 0.94) + (~targetWaveMorph * 0.06);
+		~wavePhase = ~wavePhase + ~musicFeatures[\texture].linlin(0, 1, 0.018, 0.055);
+		~voiceWaveMorph = (~waveMorph + (~wavePhase.sin * ~musicFeatures[\contrast].linlin(0, 1, 0.12, 0.42))).clip(0, 2);
+		~harmonyMix = (~harmonyMix * 0.9) + (~targetHarmonyMix * 0.1);
+		~filterDrive = (~filterDrive * 0.9) + (~targetFilterDrive * 0.1);
+		~cutoffLfoDepth = (~cutoffLfoDepth * 0.92) + (~targetCutoffLfoDepth * 0.08);
+		~cutoffLfoRate = (~cutoffLfoRate * 0.94) + (~targetCutoffLfoRate * 0.06);
+		~cutoffSHDepth = (~cutoffSHDepth * 0.94) + (~targetCutoffSHDepth * 0.06);
+		~cutoffSHRate = (~cutoffSHRate * 0.96) + (~targetCutoffSHRate * 0.04);
+		~cutoffSHChance = (~cutoffSHChance * 0.95) + (~targetCutoffSHChance * 0.05);
+		~grainMix = (~grainMix * 0.92) + (~targetGrainMix * 0.08);
+		~grainSize = (~grainSize * 0.94) + (~targetGrainSize * 0.06);
+		~grainPitch = (~grainPitch * 0.94) + (~targetGrainPitch * 0.06);
+		~grainPitchDisp = (~grainPitchDisp * 0.92) + (~targetGrainPitchDisp * 0.08);
+		~grainTimeDisp = (~grainTimeDisp * 0.92) + (~targetGrainTimeDisp * 0.08);
+		~autoPanMix = (~autoPanMix * 0.94) + (~targetAutoPanMix * 0.06);
+		~autoPanDepth = (~autoPanDepth * 0.94) + (~targetAutoPanDepth * 0.06);
+		~autoPanSpeed = (~autoPanSpeed * 0.96) + (~targetAutoPanSpeed * 0.04);
+		~autoPanShape = (~autoPanShape * 0.95) + (~targetAutoPanShape * 0.05);
+		~ambiAngle = (~ambiAngle * 0.96) + (~targetAmbiAngle * 0.04);
+		~ambiRotateRate = (~ambiRotateRate * 0.97) + (~targetAmbiRotateRate * 0.03);
+		~ambiRotateDepth = (~ambiRotateDepth * 0.95) + (~targetAmbiRotateDepth * 0.05);
+		~ambiElevation = (~ambiElevation * 0.96) + (~targetAmbiElevation * 0.04);
+		~binauralWidth = (~binauralWidth * 0.96) + (~targetBinauralWidth * 0.04);
+		~binauralEarDelay = (~binauralEarDelay * 0.96) + (~targetBinauralEarDelay * 0.04);
+		~binauralLevel = (~binauralLevel * 0.96) + (~targetBinauralLevel * 0.04);
+		~tempo = (~tempo * 0.985) + (~targetTempo * 0.015);
+		~tempoPhase = ~tempoPhase + ~musicFeatures[\texture].linlin(0, 1, 0.004, 0.014);
+		~tempoWander = (~tempo * (1 + (~tempoPhase.sin * ~musicFeatures[\contrast].linlin(0, 1, 0.015, 0.075)))).clip(0.55, 1.55);
+		~grainPan.set(
+			\grainMix, ~grainMix,
+			\grainSize, ~grainSize,
+			\grainPitch, ~grainPitch,
+			\grainPitchDisp, ~grainPitchDisp,
+			\grainTimeDisp, ~grainTimeDisp,
+			\autoPanMix, ~autoPanMix,
+			\autoPanDepth, ~autoPanDepth,
+			\autoPanSpeed, ~autoPanSpeed,
+			\autoPanShape, ~autoPanShape,
+			\ambiAngle, ~ambiAngle,
+			\ambiRotateRate, ~ambiRotateRate,
+			\ambiRotateDepth, ~ambiRotateDepth,
+			\ambiElevation, ~ambiElevation,
+			\mix, ~tapeMix,
+			\delay, ~tapeDelayTime,
+			\feedback, ~delayFeedback,
+			\wow, ~tapeWow,
+			\tone, ~tapeTone,
+			\drive, ~tapeDrive
+		);
+		~binaural.set(\width, ~binauralWidth, \earDelay, ~binauralEarDelay, \level, ~binauralLevel);
+		~updateDroneKey.();
+	};
+
+	~playTestNote = {
+		Synth(\sh101Voice, [
+			\out, ~synthBus.index,
+			\directOut, 0,
+			\freq, 110,
+			\amp, 0.18,
+			\sustain, 1.2,
+			\cutoff, 1600,
+			\resonance, 0.35,
+			\envAmt, 2200,
+			\accent, 0.8,
+			\directAmp, 0.55,
+			\attack, 0.01,
+			\decay, 0.4,
+			\release, 0.55,
+			\drift, 2.5,
+			\driftRate, 0.06,
+			\waveMorph, 0.25,
+			\harmonyMix, 0.18,
+			\filterMode, 0,
+			\filterDrive, 0.35,
+			\cutoffLfoDepth, 0.12,
+			\cutoffLfoRate, 0.04,
+			\cutoffSHDepth, 0.18,
+			\cutoffSHRate, 0.035,
+			\cutoffSHChance, 0.18
+		]);
+		~announce.("test note triggered");
+	};
+
+	~chooseArpMode = {
+		var f, weights;
+		f = ~musicFeatures;
+		weights = [
+			f[\brightness].linlin(0, 1, 0.18, 0.28),
+			f[\brightness].linlin(0, 1, 0.24, 0.12),
+			f[\warmth].linlin(0, 1, 0.18, 0.3),
+			f[\texture].linlin(0, 1, 0.08, 0.25),
+			f[\contrast].linlin(0, 1, 0.1, 0.28)
+		].normalizeSum;
+		~arpMode = ~arpModes.wchoose(weights);
+		~arpModeStep = 0;
+		~arpDirection = 1;
+		~randomOrder = (0 .. (~currentMotif.size - 1)).scramble;
+		if(~arpMode == \pseudoRandom) {
+			~pseudoOrder = (0 .. (~currentMotif.size - 1)).scramble;
+		};
+		~arpModeChangeEvery = ~musicFeatures[\texture].linlin(0, 1, 24, 8).round(1).asInteger.max(4);
+		~announce.("arp order: " ++ ~arpMode);
+	};
+
+	~chooseArpSpeedMode = {
+		var f, weights;
+		f = ~musicFeatures;
+		weights = [
+			f[\brightness].linlin(0, 1, 0.24, 0.1),
+			f[\brightness].linlin(0, 1, 0.22, 0.26),
+			f[\texture].linlin(0, 1, 0.08, 0.28),
+			f[\contrast].linlin(0, 1, 0.1, 0.28),
+			(f[\texture] + f[\contrast]).linlin(0, 2, 0.1, 0.3)
+		].normalizeSum;
+		~arpSpeedMode = ~arpSpeedModes.wchoose(weights);
+		~arpSpeedChangeEvery = f[\texture].linlin(0, 1, 20, 6).round(1).asInteger.max(4);
+		~pseudoRhythmStep = 0;
+		if(~arpSpeedMode == \pseudoRhythm) {
+			~pseudoRhythmPattern = [0.5, 0.75, 1, 1.5, 2, 0.666, 1.333, 1].scramble;
+		};
+		~announce.("arp speed: " ++ ~arpSpeedMode);
+	};
+
+	~chooseFilterMode = {
+		var f, weights, modes, choice;
+		f = ~musicFeatures;
+		modes = [[0, \lowpass], [1, \highpass], [2, \notch]];
+		weights = [
+			f[\brightness].linlin(0, 1, 0.62, 0.48),
+			f[\texture].linlin(0, 1, 0.12, 0.28) + if(~tagMode == \minor) { 0.06 } { 0 },
+			f[\contrast].linlin(0, 1, 0.1, 0.34)
+		].normalizeSum;
+		choice = modes.wchoose(weights);
+		~filterMode = choice[0];
+		~filterModeName = choice[1];
+		~filterModeChangeEvery = f[\texture].linlin(0, 1, 28, 8).round(1).asInteger.max(6);
+		~announce.("filter mode: " ++ ~filterModeName);
+	};
+
+	~arpSpeedMultiplier = {
+		var multiplier, value;
+		if((~arpStep > 0) and: { (~arpStep % ~arpSpeedChangeEvery) == 0 }) {
+			~chooseArpSpeedMode.();
+		};
+		multiplier = if(~arpSpeedMode == \half) {
+			2
+		} {
+			if(~arpSpeedMode == \double) {
+				0.5
+			} {
+				if(~arpSpeedMode == \triplet) {
+					2 / 3
+				} {
+					if(~arpSpeedMode == \pseudoRhythm) {
+						value = ~pseudoRhythmPattern.wrapAt(~pseudoRhythmStep);
+						~pseudoRhythmStep = ~pseudoRhythmStep + 1;
+						value
+					} {
+						1
+					}
+				}
+			}
+		};
+		multiplier
+	};
+
+	~nextArpIndex = {
+		var size, index, maxIndex;
+		size = ~currentMotif.size.max(1);
+		maxIndex = (size - 1).max(1);
+		if((~arpStep > 0) and: { (~arpStep % ~arpModeChangeEvery) == 0 }) {
+			~chooseArpMode.();
+		};
+		index = if(~arpMode == \down) {
+			size - 1 - (~arpModeStep % size)
+		} {
+			if(~arpMode == \pingpong) {
+				if(~arpModeStep >= maxIndex) {
+					~arpModeStep = 0;
+					~arpDirection = ~arpDirection.neg;
+				};
+				if(~arpDirection > 0) { ~arpModeStep } { maxIndex - ~arpModeStep }
+			} {
+				if(~arpMode == \random) {
+					size.rand
+				} {
+					if(~arpMode == \pseudoRandom) {
+						if((~arpModeStep % size) == 0) {
+							~pseudoOrder = (0 .. (size - 1)).scramble;
+						};
+						~pseudoOrder.wrapAt(~arpModeStep)
+					} {
+						~arpModeStep % size
+					}
+				}
+			}
+		};
+		~arpModeStep = ~arpModeStep + 1;
+		index.clip(0, size - 1)
+	};
+
+	~arpStep = 0;
+	~playArpStep = {
+		var f, scaleInfo, root, scale, degree, motifIndex, chordOffset, octave, midi, freq;
+		var amp, pan, sustain, waitTime, accent, bassDegree, releaseDrift, followFreq;
+		f = ~musicFeatures;
+		if((~arpStep > 0) and: { (~arpStep % ~filterModeChangeEvery) == 0 }) {
+			~chooseFilterMode.();
+		};
+		scaleInfo = ~scaleForFeatures.();
+		~evolveEnvelope.();
+		root = scaleInfo[0];
+		scale = scaleInfo[1];
+		motifIndex = ~nextArpIndex.();
+		degree = ~currentMotif.wrapAt(motifIndex);
+		chordOffset = [0, 2, 4, 7].wrapAt((motifIndex / 2).floor);
+		octave = [12, 24, 24, 36].wrapAt(~arpStep) + if((~arpStep % 8) == 7) { 12 } { 0 };
+		midi = root + octave + ~degreeToSemitone.(degree + chordOffset, scale);
+		freq = midi.midicps;
+
+		accent = if((~arpStep % 4) == 0) { 0.85 } { f[\contrast].linlin(0, 1, 0.2, 0.65) };
+		amp = f[\brightness].linlin(0, 1, 0.085, 0.17);
+		pan = f[\red].linlin(0, 1, -0.45, 0.45) + 0.12.rand2;
+		sustain = ~noteDur;
+		releaseDrift = ~release.linlin(0.08, 6.5, 0, 8).clip(0, 8);
+		Synth(\sh101Voice, [
+			\out, ~synthBus.index,
+			\directOut, 0,
+			\freq, freq,
+			\amp, amp,
+			\pan, pan.clip(-1, 1),
+			\sustain, sustain,
+			\cutoff, ~cutoff * (0.86 + (0.18 * (~arpStep % 4))),
+			\resonance, (~resonance + (accent * 0.035)).clip(0, 1),
+			\envAmt, ~envAmt,
+			\pulseWidth, ~pulseWidth,
+			\accent, accent,
+			\glide, f[\warmth].linlin(0, 1, 0.015, 0.11),
+			\directAmp, 0.42,
+			\attack, ~attack,
+			\decay, ~decay,
+			\release, ~release,
+			\drift, (~drift + releaseDrift).clip(0.2, 22),
+			\driftRate, ~driftRate,
+			\waveMorph, ~voiceWaveMorph,
+			\harmonyMix, ~harmonyMix,
+			\filterMode, ~filterMode,
+			\filterDrive, ~filterDrive,
+			\cutoffLfoDepth, ~cutoffLfoDepth,
+			\cutoffLfoRate, ~cutoffLfoRate,
+			\cutoffSHDepth, ~cutoffSHDepth,
+			\cutoffSHRate, ~cutoffSHRate,
+			\cutoffSHChance, ~cutoffSHChance,
+			\h1, f[\h1],
+			\h2, f[\h2],
+			\h3, f[\h3],
+			\h4, f[\h4],
+			\h5, f[\h5],
+			\h6, f[\h6]
+		]);
+		if(~arpPitchHistory.size >= 2) {
+			followFreq = ~arpPitchHistory.wrapAt(~arpPitchHistory.size - 2);
+			Synth(\sh101Voice, [
+				\out, ~synthBus.index,
+				\directOut, 0,
+				\freq, followFreq,
+				\amp, amp * 0.58,
+				\pan, (pan.neg * 0.75).clip(-1, 1),
+				\sustain, sustain * 1.08,
+				\cutoff, (~cutoff * 0.78).clip(90, 9000),
+				\resonance, (~resonance + 0.018).clip(0, 1),
+				\envAmt, ~envAmt * 0.82,
+				\pulseWidth, ~pulseWidth,
+				\accent, accent * 0.55,
+				\glide, f[\warmth].linlin(0, 1, 0.025, 0.14),
+				\directAmp, 0.28,
+				\attack, (~attack * 1.12).clip(0.01, 4),
+				\decay, ~decay,
+				\release, (~release * 1.2).clip(0.1, 9),
+				\drift, (~drift + releaseDrift + 1.5).clip(0.2, 24),
+				\driftRate, (~driftRate * 0.82).clip(0.01, 0.16),
+				\waveMorph, (~voiceWaveMorph + 0.18).clip(0, 2),
+				\harmonyMix, (~harmonyMix * 0.72).clip(0.02, 0.55),
+				\filterMode, ~filterMode,
+				\filterDrive, (~filterDrive * 0.82).clip(0.03, 0.8),
+				\cutoffLfoDepth, (~cutoffLfoDepth * 0.9).clip(0.01, 0.58),
+				\cutoffLfoRate, (~cutoffLfoRate * 0.86).clip(0.006, 0.16),
+				\cutoffSHDepth, (~cutoffSHDepth * 0.82).clip(0, 0.62),
+				\cutoffSHRate, (~cutoffSHRate * 0.92).clip(0.01, 0.08),
+				\cutoffSHChance, (~cutoffSHChance * 0.86).clip(0.02, 0.55),
+				\h1, f[\h1],
+				\h2, f[\h2],
+				\h3, f[\h3],
+				\h4, f[\h4],
+				\h5, f[\h5],
+				\h6, f[\h6]
+			]);
+		};
+		~arpPitchHistory.add(freq);
+		while { ~arpPitchHistory.size > 16 } {
+			~arpPitchHistory.removeAt(0);
+		};
+
+		if((~arpStep % 8) == 0) {
+			bassDegree = [0, 3, 4].wchoose([0.62, 0.18, 0.2]);
+			Synth(\sh101Voice, [
+				\out, ~synthBus.index,
+				\directOut, 0,
+					\freq, (root + ~degreeToSemitone.(bassDegree, scale)).midicps,
+					\amp, f[\brightness].linlin(0, 1, 0.065, 0.12),
+					\pan, -0.05,
+					\sustain, (~noteDur * 3.4).clip(1.2, 7),
+				\cutoff, (~cutoff * 0.45).clip(90, 1800),
+				\resonance, (~resonance * 0.72).clip(0, 1),
+				\envAmt, ~envAmt * 0.55,
+				\pulseWidth, ~pulseWidth,
+				\accent, 0.42,
+				\glide, 0.08,
+				\directAmp, 0.35,
+				\attack, (~attack * 1.4).clip(0.01, 3),
+				\decay, (~decay * 1.35).clip(0.08, 6),
+				\release, (~release * 1.7).clip(0.1, 9),
+				\drift, ((~drift * 0.65) + (releaseDrift * 0.45)).clip(0.2, 12),
+				\driftRate, (~driftRate * 0.7).clip(0.01, 0.14),
+				\waveMorph, ~voiceWaveMorph,
+				\harmonyMix, (~harmonyMix * 0.55).clip(0.02, 0.5),
+				\filterMode, ~filterMode,
+				\filterDrive, (~filterDrive * 0.72).clip(0.03, 0.7),
+				\cutoffLfoDepth, (~cutoffLfoDepth * 0.65).clip(0.01, 0.42),
+				\cutoffLfoRate, (~cutoffLfoRate * 0.75).clip(0.006, 0.14),
+				\cutoffSHDepth, (~cutoffSHDepth * 0.58).clip(0, 0.46),
+				\cutoffSHRate, (~cutoffSHRate * 0.78).clip(0.01, 0.07),
+				\cutoffSHChance, (~cutoffSHChance * 0.68).clip(0.02, 0.42),
+				\h1, f[\h1],
+				\h2, f[\h2],
+				\h3, f[\h3],
+				\h4, f[\h4],
+				\h5, f[\h5],
+				\h6, f[\h6]
+			]);
+		};
+
+		~arpStep = ~arpStep + 1;
+			waitTime = (~noteDur * f[\texture].linlin(0, 1, 1.0, 0.75) * ~arpSpeedMultiplier.() / ~tempoWander).clip(0.14, 6.2);
+			waitTime
+	};
+
+	~startArp = {
+		if(~arpRoutine.notNil) { ~arpRoutine.stop };
+		~chooseArpMode.();
+		~chooseArpSpeedMode.();
+		~chooseFilterMode.();
+		~arpRoutine = Routine {
+			~announce.("arpeggiator started");
+			loop {
+				~playArpStep.().wait;
+			}
+		}.play(TempoClock.default);
+	};
+
+	~stopArp = {
+		if(~arpRoutine.notNil) {
+			~arpRoutine.stop;
+			~arpRoutine = nil;
+			~announce.("arpeggiator stopped");
+		};
+	};
+
+	~startArp.();
+
+	~imageFiles = {
+		var dir = PathName(~imageFolder);
+		if(File.exists(~imageFolder).not) {
+			~announce.("Creating image folder: " ++ ~imageFolder);
+			("mkdir -p " ++ ~imageFolder).unixCmd;
+		};
+		PathName(~imageFolder).files.select { |path|
+			~exts.includes(path.extension.asString.toLower)
+		}.sort { |a, b| a.fileName < b.fileName }
+	};
+
+	~applyImage = { |path|
+		var features;
+		~announce.("reading " ++ path.fileName);
+		features = ~analyzeImage.(path.fullPath);
+		if(features.notNil) {
+			~lastFeatures = features;
+			~rebuildMusicState.();
+			~announce.(
+				"brightness " ++ features[\brightness].round(0.01)
+				++ " | saturation " ++ features[\saturation].round(0.01)
+				++ " | contrast " ++ features[\contrast].round(0.01)
+				++ " | warmth " ++ features[\warmth].round(0.01)
+				++ " | texture " ++ features[\texture].round(0.01)
+				++ " | cutoff " ++ ~cutoff.round(1)
+				++ " | resonance " ++ ~resonance.round(0.01)
+				++ " | env " ++ ~targetAttack.round(0.01) ++ "/"
+				++ ~targetDecay.round(0.01) ++ "/"
+				++ ~targetRelease.round(0.01)
+				++ " | drift " ++ ~targetDrift.round(0.1)
+				++ " | noteDur " ++ ~targetNoteDur.round(0.01)
+				++ " | feedback " ++ ~targetDelayFeedback.round(0.01)
+				++ " | wave " ++ ~targetWaveMorph.round(0.01)
+				++ " | harm " ++ ~targetHarmonyMix.round(0.01)
+				++ " | filter " ++ ~filterModeName
+				++ " | drive " ++ ~targetFilterDrive.round(0.01)
+				++ " | lfo " ++ ~targetCutoffLfoDepth.round(0.01)
+				++ " | s+h " ++ ~targetCutoffSHDepth.round(0.01)
+				++ " | grain " ++ ~targetGrainMix.round(0.01)
+				++ " | pan " ++ ~targetAutoPanDepth.round(0.01)
+				++ " | ambi " ++ ~targetAmbiAngle.round(1) ++ "/"
+				++ ~targetAmbiRotateDepth.round(0.01)
+				++ " | tempo " ++ ~targetTempo.round(0.01)
+			);
+		};
+	};
+
+	~watcher = Routine {
+		~announce.("Drop images into: " ++ ~imageFolder);
+		loop {
+			~imageFiles.().do { |path|
+				if(~seenImages.includes(path.fullPath).not) {
+					~seenImages.add(path.fullPath);
+					~applyImage.(path);
+				};
+			};
+			~pollSeconds.wait;
+		}
+	}.play(AppClock);
+
+	~makeControlWindow = {
+		var window, y, sliders, makeSlider, modeMenu, speedMenu, filterMenu, presetMenu, presetNameField;
+		var saveButton, loadButton, randomButton, refreshButton, rowHeight, valueWidth;
+		try {
+			rowHeight = 23;
+			valueWidth = 58;
+			sliders = IdentityDictionary.new;
+			~controlGuiUpdating = false;
+			window = Window("Visual Ambient Controls", Rect(760, 20, 540, 1080)).front;
+			y = 10;
+
+			StaticText(window, Rect(12, y, 496, 18)).string = "Live controls: image/tag analysis updates these values as the patch evolves";
+			y = y + 28;
+
+			StaticText(window, Rect(12, y + 3, 64, 18)).string = "preset";
+			presetNameField = TextField(window, Rect(80, y, 118, 22));
+			presetNameField.string = "visual_ambient_preset";
+			saveButton = Button(window, Rect(204, y, 50, 22));
+			saveButton.states = [["Save"]];
+			loadButton = Button(window, Rect(260, y, 50, 22));
+			loadButton.states = [["Load"]];
+			randomButton = Button(window, Rect(316, y, 66, 22));
+			randomButton.states = [["Random"]];
+			refreshButton = Button(window, Rect(388, y, 62, 22));
+			refreshButton.states = [["Refresh"]];
+			presetMenu = PopUpMenu(window, Rect(456, y, 72, 22));
+			presetMenu.items = ["(no presets saved)"];
+			saveButton.action = { ~savePreset.(presetNameField.string) };
+			loadButton.action = {
+				var selected;
+				selected = presetMenu.items.wrapAt(presetMenu.value);
+				if(selected.notNil and: { selected != "(no presets saved)" }) {
+					~loadPreset.(selected);
+					presetNameField.string = selected;
+				} {
+					~loadPreset.(presetNameField.string);
+				};
+			};
+			randomButton.action = { ~randomisePreset.() };
+			refreshButton.action = { ~refreshPresetMenu.() };
+			y = y + 30;
+
+			makeSlider = { |key, label, min, max, step, getFunc, setFunc|
+				var slider;
+				slider = EZSlider(
+					window,
+					Rect(12, y, 516, 20),
+					label,
+					ControlSpec(min, max, \lin, step, getFunc.value),
+					{ |view|
+						if(~controlGuiUpdating.not) {
+							setFunc.value(view.value);
+						};
+					},
+					getFunc.value,
+					false,
+					145,
+					valueWidth
+				);
+				sliders[key] = (view: slider, get: getFunc);
+				y = y + rowHeight;
+			};
+
+			makeSlider.(\cutoff, "LP cutoff", 45, 15000, 1, { ~cutoff }, { |v| ~cutoff = v.clip(45, 15000) });
+			makeSlider.(\resonance, "resonance", 0, 1, 0.001, { ~resonance }, { |v| ~resonance = v.clip(0, 1) });
+			makeSlider.(\envAmt, "filter env", 0, 5000, 1, { ~envAmt }, { |v| ~envAmt = v.clip(0, 5000) });
+			makeSlider.(\pulseWidth, "pulse width", 0.08, 0.92, 0.001, { ~pulseWidth }, { |v| ~pulseWidth = v.clip(0.08, 0.92) });
+			makeSlider.(\attack, "attack target", 0.005, 4, 0.001, { ~targetAttack }, { |v| ~targetAttack = v.clip(0.005, 4) });
+			makeSlider.(\decay, "decay target", 0.03, 8, 0.001, { ~targetDecay }, { |v| ~targetDecay = v.clip(0.03, 8) });
+			makeSlider.(\release, "release target", 0.03, 12, 0.001, { ~targetRelease }, { |v| ~targetRelease = v.clip(0.03, 12) });
+			makeSlider.(\drift, "pitch drift", 0, 24, 0.01, { ~targetDrift }, { |v| ~targetDrift = v.clip(0, 24) });
+			makeSlider.(\driftRate, "drift rate", 0.005, 0.35, 0.001, { ~targetDriftRate }, { |v| ~targetDriftRate = v.clip(0.005, 0.35) });
+			makeSlider.(\noteDur, "note duration", 0.14, 6.2, 0.001, { ~targetNoteDur }, { |v| ~targetNoteDur = v.clip(0.14, 6.2) });
+			makeSlider.(\delayFeedback, "delay feedback", 0, 0.88, 0.001, { ~targetDelayFeedback }, { |v| ~targetDelayFeedback = v.clip(0, 0.88); ~delayFeedback = ~targetDelayFeedback; ~grainPan.set(\feedback, ~delayFeedback) });
+			makeSlider.(\tapeMix, "delay mix", 0, 1, 0.001, { ~tapeMix }, { |v| ~tapeMix = v.clip(0, 1); ~grainPan.set(\mix, ~tapeMix) });
+			makeSlider.(\tapeDelayTime, "delay time", 0.04, 1.55, 0.001, { ~tapeDelayTime }, { |v| ~tapeDelayTime = v.clip(0.04, 1.55); ~grainPan.set(\delay, ~tapeDelayTime) });
+			makeSlider.(\tapeWow, "tape wow", 0, 0.9, 0.001, { ~tapeWow }, { |v| ~tapeWow = v.clip(0, 0.9); ~grainPan.set(\wow, ~tapeWow) });
+			makeSlider.(\tapeTone, "delay tone", 500, 9000, 1, { ~tapeTone }, { |v| ~tapeTone = v.clip(500, 9000); ~grainPan.set(\tone, ~tapeTone) });
+			makeSlider.(\tapeDrive, "delay drive", 0.6, 2.4, 0.001, { ~tapeDrive }, { |v| ~tapeDrive = v.clip(0.6, 2.4); ~grainPan.set(\drive, ~tapeDrive) });
+			makeSlider.(\waveMorph, "wave morph", 0, 2, 0.001, { ~targetWaveMorph }, { |v| ~targetWaveMorph = v.clip(0, 2) });
+			makeSlider.(\harmonyMix, "harmony mix", 0, 0.85, 0.001, { ~targetHarmonyMix }, { |v| ~targetHarmonyMix = v.clip(0, 0.85) });
+			makeSlider.(\filterDrive, "filter drive", 0, 1, 0.001, { ~targetFilterDrive }, { |v| ~targetFilterDrive = v.clip(0, 1) });
+			makeSlider.(\cutoffLfoDepth, "cutoff LFO depth", 0, 0.8, 0.001, { ~targetCutoffLfoDepth }, { |v| ~targetCutoffLfoDepth = v.clip(0, 0.8) });
+			makeSlider.(\cutoffLfoRate, "cutoff LFO rate", 0.005, 0.25, 0.001, { ~targetCutoffLfoRate }, { |v| ~targetCutoffLfoRate = v.clip(0.005, 0.25) });
+			makeSlider.(\cutoffSHDepth, "S+H cutoff depth", 0, 0.9, 0.001, { ~targetCutoffSHDepth }, { |v| ~targetCutoffSHDepth = v.clip(0, 0.9) });
+			makeSlider.(\cutoffSHRate, "S+H cutoff rate", 0.008, 0.16, 0.001, { ~targetCutoffSHRate }, { |v| ~targetCutoffSHRate = v.clip(0.008, 0.16) });
+			makeSlider.(\cutoffSHChance, "S+H chance", 0, 1, 0.001, { ~targetCutoffSHChance }, { |v| ~targetCutoffSHChance = v.clip(0, 1) });
+			makeSlider.(\grainMix, "grain mix", 0, 1, 0.001, { ~targetGrainMix }, { |v| ~targetGrainMix = v.clip(0, 1) });
+			makeSlider.(\grainSize, "grain size", 0.02, 0.6, 0.001, { ~targetGrainSize }, { |v| ~targetGrainSize = v.clip(0.02, 0.6) });
+			makeSlider.(\grainPitch, "grain pitch", -24, 24, 0.001, { ~targetGrainPitch }, { |v| ~targetGrainPitch = v.clip(-24, 24) });
+			makeSlider.(\grainPitchDisp, "grain pitch jitter", 0, 1, 0.001, { ~targetGrainPitchDisp }, { |v| ~targetGrainPitchDisp = v.clip(0, 1) });
+			makeSlider.(\grainTimeDisp, "grain time jitter", 0, 1, 0.001, { ~targetGrainTimeDisp }, { |v| ~targetGrainTimeDisp = v.clip(0, 1) });
+			makeSlider.(\autoPanMix, "auto-pan mix", 0, 1, 0.001, { ~targetAutoPanMix }, { |v| ~targetAutoPanMix = v.clip(0, 1) });
+			makeSlider.(\autoPanDepth, "auto-pan depth", 0, 1, 0.001, { ~targetAutoPanDepth }, { |v| ~targetAutoPanDepth = v.clip(0, 1) });
+			makeSlider.(\autoPanSpeed, "auto-pan speed", 0.01, 8, 0.001, { ~targetAutoPanSpeed }, { |v| ~targetAutoPanSpeed = v.clip(0.01, 8) });
+			makeSlider.(\autoPanShape, "auto-pan shape", 0, 1, 0.001, { ~targetAutoPanShape }, { |v| ~targetAutoPanShape = v.clip(0, 1) });
+			makeSlider.(\ambiAngle, "ambi angle", -180, 180, 0.001, { ~targetAmbiAngle }, { |v| ~targetAmbiAngle = v.clip(-180, 180) });
+			makeSlider.(\ambiRotateRate, "ambi rotate rate", 0.001, 1.2, 0.001, { ~targetAmbiRotateRate }, { |v| ~targetAmbiRotateRate = v.clip(0.001, 1.2) });
+			makeSlider.(\ambiRotateDepth, "ambi rotate depth", 0, 1, 0.001, { ~targetAmbiRotateDepth }, { |v| ~targetAmbiRotateDepth = v.clip(0, 1) });
+			makeSlider.(\ambiElevation, "ambi elevation", -1, 1, 0.001, { ~targetAmbiElevation }, { |v| ~targetAmbiElevation = v.clip(-1, 1) });
+			makeSlider.(\binauralWidth, "binaural width", 0, 1.4, 0.001, { ~targetBinauralWidth }, { |v| ~targetBinauralWidth = v.clip(0, 1.4) });
+			makeSlider.(\binauralEarDelay, "binaural ear delay", 0, 0.01, 0.00001, { ~targetBinauralEarDelay }, { |v| ~targetBinauralEarDelay = v.clip(0, 0.01) });
+			makeSlider.(\binauralLevel, "binaural level", 0, 1.4, 0.001, { ~targetBinauralLevel }, { |v| ~targetBinauralLevel = v.clip(0, 1.4) });
+			makeSlider.(\tempo, "tempo target", 0.55, 1.55, 0.001, { ~targetTempo }, { |v| ~targetTempo = v.clip(0.55, 1.55) });
+			makeSlider.(\droneAmp, "drone level", 0, 0.08, 0.001, { ~musicFeatures[\brightness].linlin(0, 1, 0.022, 0.045) }, { |v| if(~drone.notNil) { ~drone.set(\amp, v.clip(0, 0.08)) } });
+			makeSlider.(\tagBlend, "tag blend", 0, 1, 0.001, { ~tagAmount }, { |v| ~tagAmount = v.clip(0, 1); ~rebuildMusicState.() });
+
+			StaticText(window, Rect(12, y + 3, 145, 18)).string = "filter mode";
+			filterMenu = PopUpMenu(window, Rect(160, y, 130, 22));
+			filterMenu.items = ["lowpass", "highpass", "notch"];
+			filterMenu.value = ~filterMode.clip(0, 2).asInteger;
+			filterMenu.action = { |menu|
+				if(~controlGuiUpdating.not) {
+					~filterMode = menu.value;
+					~filterModeName = [\lowpass, \highpass, \notch].wrapAt(~filterMode);
+				};
+			};
+			y = y + rowHeight;
+
+			StaticText(window, Rect(12, y + 3, 145, 18)).string = "arp order";
+			modeMenu = PopUpMenu(window, Rect(160, y, 130, 22));
+			modeMenu.items = ~arpModes.collect { |item| item.asString };
+			modeMenu.value = ~arpModes.indexOf(~arpMode).max(0);
+			modeMenu.action = { |menu|
+				if(~controlGuiUpdating.not) {
+					~arpMode = ~arpModes.wrapAt(menu.value);
+					~arpModeStep = 0;
+				};
+			};
+			y = y + rowHeight;
+
+			StaticText(window, Rect(12, y + 3, 145, 18)).string = "arp speed";
+			speedMenu = PopUpMenu(window, Rect(160, y, 130, 22));
+			speedMenu.items = ~arpSpeedModes.collect { |item| item.asString };
+			speedMenu.value = ~arpSpeedModes.indexOf(~arpSpeedMode).max(0);
+			speedMenu.action = { |menu|
+				if(~controlGuiUpdating.not) {
+					~arpSpeedMode = ~arpSpeedModes.wrapAt(menu.value);
+					~pseudoRhythmStep = 0;
+				};
+			};
+			y = y + 36;
+
+			Button(window, Rect(12, y, 90, 26)).states_([["Start arp"]]).action_({ ~startArp.() });
+			Button(window, Rect(108, y, 90, 26)).states_([["Stop arp"]]).action_({ ~stopArp.() });
+			Button(window, Rect(204, y, 90, 26)).states_([["Test note"]]).action_({ ~playTestNote.() });
+			Button(window, Rect(300, y, 90, 26)).states_([["One step"]]).action_({ ~playArpStep.() });
+			Button(window, Rect(396, y, 90, 26)).states_([["Rebuild"]]).action_({ ~rebuildMusicState.() });
+
+			~controlGui = (
+				window: window,
+				sliders: sliders,
+				filterMenu: filterMenu,
+				modeMenu: modeMenu,
+				speedMenu: speedMenu,
+				presetMenu: presetMenu
+			);
+			window.onClose_({ ~controlGui = nil });
+			~refreshPresetMenu.();
+			~updateControlGui.();
+		} {
+			~announce.("Could not open control window.");
+		};
+	};
+
+	~updateControlGui = {
+		if(~controlGui.notNil) {
+			{
+				~controlGuiUpdating = true;
+				~controlGui[\sliders].keysValuesDo { |key, spec|
+					spec[\view].value = spec[\get].value;
+				};
+				~controlGui[\filterMenu].value = ~filterMode.clip(0, 2).asInteger;
+				~controlGui[\modeMenu].value = ~arpModes.indexOf(~arpMode).max(0);
+				~controlGui[\speedMenu].value = ~arpSpeedModes.indexOf(~arpSpeedMode).max(0);
+				~controlGuiUpdating = false;
+			}.defer;
+		};
+	};
+
+	~controlGuiRoutine = Routine {
+		loop {
+			~updateControlGui.();
+			0.35.wait;
+		}
+	}.play(AppClock);
+
+	~makeTagWindow = {
+		var window, field, applyButton, clearButton, label;
+		try {
+			window = Window("Painting Tags", Rect(220, 220, 520, 104)).front;
+			label = StaticText(window, Rect(12, 10, 496, 18));
+			label.string = "Enter painting tags, e.g. cloudy romantic landscape";
+			field = TextField(window, Rect(12, 36, 340, 28));
+			field.string = ~tagText;
+			applyButton = Button(window, Rect(362, 36, 70, 28));
+			applyButton.states = [["Apply"]];
+			clearButton = Button(window, Rect(440, 36, 68, 28));
+			clearButton.states = [["Clear"]];
+			field.action = { ~applyTags.(field.string) };
+			applyButton.action = { ~applyTags.(field.string) };
+			clearButton.action = {
+				field.string = "";
+				~applyTags.("");
+			};
+			~tagWindow = window;
+		} {
+			~announce.("Could not open tag window. Use ~applyTags.(\"cloudy romantic landscape\") instead.");
+		};
+	};
+
+	{
+		~makeTagWindow.();
+		~makeControlWindow.();
+		~announce.("Enter tags in the window, or evaluate ~applyTags.(\"cloudy romantic landscape\").");
+	}.defer;
+
+	~stopVisualAmbient = {
+		~watcher.stop;
+		~stopArp.();
+		if(~drone.notNil) { ~drone.set(\gate, 0) };
+		if(~grainPan.notNil) { ~grainPan.free };
+		if(~binaural.notNil) { ~binaural.free };
+		if(~tagWindow.notNil) { ~tagWindow.close };
+		if(~controlGuiRoutine.notNil) { ~controlGuiRoutine.stop };
+		if(~controlGui.notNil) { ~controlGui[\window].close };
+		"visual ambient system stopped".postln;
+	};
+
+	~announce.("running. Evaluate ~startArp.() to restart the arpeggiator, or ~stopVisualAmbient.() to stop.");
+};
+)
