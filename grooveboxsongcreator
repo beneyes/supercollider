@@ -1,0 +1,302 @@
+/*
+Groovebox Song Creator
+
+Run this alongside combined_808_606_sh101_groovebox.scd.
+It reads the groovebox preset text file, lets you arrange presets into song sections,
+then sends named preset changes to the main groovebox in time.
+
+The main groovebox listens for:
+/combinedGroovebox/preset, "Preset Name"
+*/
+
+(
+var win, root, rowArea, statusLabel, presetFileLabel;
+var presetPath, songPath, presetData, presetNames, songRows, rowViews, maxRows = 24;
+var tempo = 126, tempoBox, targetPort, targetPortBox, playing = false, clock, task, currentRow = 0, currentBar = 0;
+var target, updateTarget, colors, font, smallFont;
+var loadPresets, refreshRows, saveSong, loadSong, exportSong, importSong;
+var sendPreset, startSong, stopSong, nextEnabledRow, moveRow, defaultRows;
+
+colors = (
+	bg: Color.new255(13, 14, 16),
+	panel: Color.new255(28, 30, 34),
+	panel2: Color.new255(42, 45, 51),
+	off: Color.new255(18, 19, 22),
+	text: Color.new255(238, 240, 235),
+	muted: Color.new255(145, 151, 150),
+	yellow: Color.new255(244, 199, 76),
+	green: Color.new255(92, 214, 141),
+	red: Color.new255(235, 94, 86),
+	blue: Color.new255(90, 154, 230)
+);
+font = Font("Helvetica", 13);
+smallFont = Font("Helvetica", 10);
+
+presetPath = Platform.userAppSupportDir +/+ "combined_808_606_sh101_presets.txt";
+songPath = Platform.userAppSupportDir +/+ "combined_808_606_sh101_song.txt";
+presetData = Dictionary.new;
+presetNames = [];
+targetPort = NetAddr.langPort;
+target = NetAddr("127.0.0.1", targetPort);
+clock = TempoClock.new(tempo / 60);
+
+updateTarget = {
+	target = NetAddr("127.0.0.1", targetPort);
+	("Song Creator target OSC port: " ++ targetPort.asString).postln;
+};
+
+defaultRows = {
+	Array.fill(maxRows, { |i|
+		(enabled: if(i == 0) { 1 } { 0 }, preset: "", bars: 4)
+	});
+};
+songRows = defaultRows.();
+
+nextEnabledRow = { |fromIndex|
+	var found;
+	found = nil;
+	(maxRows - fromIndex - 1).do({ |offset|
+		var idx;
+		idx = fromIndex + offset + 1;
+		if(found.isNil and: { songRows[idx][\enabled] == 1 and: { songRows[idx][\preset].size > 0 } }) {
+			found = idx;
+		};
+	});
+	if(found.isNil) {
+		maxRows.do({ |idx|
+			if(found.isNil and: { songRows[idx][\enabled] == 1 and: { songRows[idx][\preset].size > 0 } }) {
+				found = idx;
+			};
+		});
+	};
+	found;
+};
+
+sendPreset = { |name|
+	if(name.notNil and: { name.size > 0 }) {
+		("Song Creator sending preset '" ++ name ++ "' to /combinedGroovebox/preset on port " ++ targetPort.asString).postln;
+		target.sendMsg("/combinedGroovebox/preset", name);
+		statusLabel.string_("sent: " ++ name);
+	};
+};
+
+loadPresets = { |path=nil|
+	var text, loaded;
+	if(path.notNil) { presetPath = path };
+	if(File.exists(presetPath)) {
+		text = File.readAllString(presetPath);
+		loaded = try { text.interpret } { Dictionary.new };
+		if(loaded.isKindOf(Dictionary)) {
+			presetData = loaded;
+			presetNames = presetData.keys.asArray.sort;
+			presetFileLabel.string_(PathName(presetPath).fileName ++ "  (" ++ presetNames.size.asString ++ ")");
+			("Song Creator loaded " ++ presetNames.size.asString ++ " presets from " ++ presetPath).postln;
+		};
+	};
+	refreshRows.();
+};
+
+moveRow = { |index, direction|
+	var other, temp;
+	other = (index + direction).clip(0, maxRows - 1).asInteger;
+	if(other != index) {
+		temp = songRows[index];
+		songRows[index] = songRows[other];
+		songRows[other] = temp;
+		refreshRows.();
+	};
+};
+
+refreshRows = {
+	var items;
+	items = ["EMPTY"] ++ presetNames;
+	if(rowViews.notNil) {
+		rowViews.do({ |views, i|
+			var presetIndex;
+			presetIndex = presetNames.indexOf(songRows[i][\preset]);
+			views[\enable].value_(songRows[i][\enabled].asInteger);
+			views[\preset].items_(items);
+			views[\preset].value_(if(presetIndex.isNil) { 0 } { presetIndex + 1 });
+			views[\bars].value_(songRows[i][\bars].clip(1, 128).asInteger);
+			views[\play].states_([[if((i == currentRow) and: { playing }) { ">" } { "SEND" }, colors[\text], if((i == currentRow) and: { playing }) { colors[\blue] } { colors[\panel2] }]]);
+		});
+	};
+};
+
+saveSong = { |path=nil|
+	var data, savePath;
+	savePath = path ? songPath;
+	data = (
+		version: 1,
+		tempo: tempo,
+		presetPath: presetPath,
+		rows: songRows.collect({ |row| (enabled: row[\enabled], preset: row[\preset], bars: row[\bars]) })
+	);
+	File.use(savePath, "w", { |file| file.write(data.asCompileString) });
+	songPath = savePath;
+	statusLabel.string_("saved song");
+};
+
+loadSong = { |path=nil|
+	var loadPath, text, data, loadedRows;
+	loadPath = path ? songPath;
+	if(File.exists(loadPath)) {
+		text = File.readAllString(loadPath);
+		data = try { text.interpret } { nil };
+		if(data.isKindOf(Event) or: { data.isKindOf(Dictionary) }) {
+			tempo = data[\tempo] ? tempo;
+			tempoBox.value_(tempo);
+			clock.tempo = tempo / 60;
+			if(data[\presetPath].notNil and: { File.exists(data[\presetPath]) }) {
+				loadPresets.(data[\presetPath]);
+			};
+			loadedRows = data[\rows] ? [];
+			songRows = defaultRows.();
+			loadedRows.do({ |row, i|
+				if(i < maxRows) {
+					songRows[i] = (
+						enabled: (row[\enabled] ? 0).clip(0, 1).asInteger,
+						preset: (row[\preset] ? "").asString,
+						bars: (row[\bars] ? 4).clip(1, 128).asInteger
+					);
+				};
+			});
+			songPath = loadPath;
+			statusLabel.string_("loaded song");
+			refreshRows.();
+		};
+	};
+};
+
+exportSong = {
+	Dialog.savePanel({ |path|
+		if(path.notNil) { saveSong.(path) };
+	});
+};
+
+importSong = {
+	Dialog.openPanel({ |path|
+		if(path.notNil) { loadSong.(path) };
+	});
+};
+
+startSong = {
+	var first;
+	if(playing.not) {
+		first = nextEnabledRow.(-1);
+		if(first.notNil) {
+			playing = true;
+			currentRow = first;
+			currentBar = 0;
+			sendPreset.(songRows[currentRow][\preset]);
+			refreshRows.();
+			task = Task({
+				while({ playing }, {
+					4.wait;
+					currentBar = currentBar + 1;
+					if(currentBar >= songRows[currentRow][\bars]) {
+						var next;
+						next = nextEnabledRow.(currentRow);
+						if(next.notNil) {
+							currentRow = next;
+							currentBar = 0;
+							sendPreset.(songRows[currentRow][\preset]);
+						};
+					};
+					{
+						statusLabel.string_("row " ++ (currentRow + 1).asString ++ "  bar " ++ (currentBar + 1).asString ++ "/" ++ songRows[currentRow][\bars].asString);
+						refreshRows.();
+					}.defer;
+				});
+			}, clock).play;
+		} {
+			statusLabel.string_("no enabled preset rows");
+		};
+	};
+};
+
+stopSong = {
+	task.notNil.if({ task.stop });
+	playing = false;
+	currentBar = 0;
+	statusLabel.string_("stopped");
+	refreshRows.();
+};
+
+win = Window("Groovebox Song Creator", Rect(80, 80, 760, 760)).background_(colors[\bg]).front;
+root = CompositeView(win, win.view.bounds.insetBy(12, 12)).background_(colors[\bg]).resize_(5);
+
+StaticText(root, Rect(0, 0, 340, 28)).string_("GROOVEBOX SONG CREATOR").font_(Font("Helvetica", 20).boldVariant).stringColor_(colors[\text]).background_(Color.clear);
+Button(root, Rect(350, 0, 74, 28)).states_([["PLAY", colors[\text], colors[\panel2]]]).font_(font.boldVariant).action_({ startSong.() });
+Button(root, Rect(430, 0, 74, 28)).states_([["STOP", colors[\text], colors[\red]]]).font_(font.boldVariant).action_({ stopSong.() });
+StaticText(root, Rect(512, 2, 50, 14)).string_("BPM").font_(smallFont).stringColor_(colors[\muted]).align_(\center).background_(Color.clear);
+tempoBox = NumberBox(root, Rect(512, 16, 56, 22)).value_(tempo).clipLo_(40).clipHi_(220).font_(font).background_(colors[\panel2]).stringColor_(colors[\text]).normalColor_(colors[\text]).typingColor_(colors[\text]).action_({ |box|
+	tempo = box.value.clip(40, 220);
+	clock.tempo = tempo / 60;
+});
+StaticText(root, Rect(578, 2, 58, 14)).string_("PORT").font_(smallFont).stringColor_(colors[\muted]).align_(\center).background_(Color.clear);
+targetPortBox = NumberBox(root, Rect(578, 16, 58, 22)).value_(targetPort).clipLo_(1024).clipHi_(65535).font_(font).background_(colors[\panel2]).stringColor_(colors[\text]).normalColor_(colors[\text]).typingColor_(colors[\text]).action_({ |box|
+	targetPort = box.value.clip(1024, 65535).asInteger;
+	updateTarget.();
+});
+statusLabel = StaticText(root, Rect(646, 8, 92, 18)).string_("ready").font_(smallFont).stringColor_(colors[\yellow]).background_(Color.clear);
+
+Button(root, Rect(0, 42, 104, 24)).states_([["LOAD PRESETS", colors[\text], colors[\panel2]]]).font_(smallFont.boldVariant).action_({
+	Dialog.openPanel({ |path| if(path.notNil) { loadPresets.(path) } });
+});
+presetFileLabel = StaticText(root, Rect(112, 45, 250, 18)).string_("no preset file loaded").font_(smallFont).stringColor_(colors[\muted]).background_(Color.clear);
+Button(root, Rect(370, 42, 70, 24)).states_([["SAVE", colors[\text], colors[\panel2]]]).font_(smallFont.boldVariant).action_({ saveSong.() });
+Button(root, Rect(446, 42, 70, 24)).states_([["LOAD", colors[\text], colors[\panel2]]]).font_(smallFont.boldVariant).action_({ loadSong.() });
+Button(root, Rect(522, 42, 88, 24)).states_([["EXPORT TXT", colors[\text], colors[\panel2]]]).font_(smallFont.boldVariant).action_({ exportSong.() });
+Button(root, Rect(616, 42, 88, 24)).states_([["IMPORT TXT", colors[\text], colors[\panel2]]]).font_(smallFont.boldVariant).action_({ importSong.() });
+
+rowArea = CompositeView(root, Rect(0, 82, 736, 620)).background_(colors[\panel]).resize_(5);
+StaticText(rowArea, Rect(6, 4, 30, 14)).string_("ON").font_(smallFont).stringColor_(colors[\muted]).align_(\center).background_(Color.clear);
+StaticText(rowArea, Rect(42, 4, 44, 14)).string_("ROW").font_(smallFont).stringColor_(colors[\muted]).align_(\center).background_(Color.clear);
+StaticText(rowArea, Rect(92, 4, 330, 14)).string_("PRESET").font_(smallFont).stringColor_(colors[\muted]).align_(\center).background_(Color.clear);
+StaticText(rowArea, Rect(430, 4, 50, 14)).string_("BARS").font_(smallFont).stringColor_(colors[\muted]).align_(\center).background_(Color.clear);
+StaticText(rowArea, Rect(486, 4, 104, 14)).string_("ORDER").font_(smallFont).stringColor_(colors[\muted]).align_(\center).background_(Color.clear);
+
+rowViews = Array.fill(maxRows, { |i|
+	var y, enable, number, preset, bars, up, down, play;
+	y = 24 + (i * 24);
+	enable = Button(rowArea, Rect(8, y, 28, 20)).states_([["", colors[\muted], colors[\off]], ["ON", colors[\bg], colors[\green]]]).font_(smallFont.boldVariant).action_({ |button|
+		songRows[i][\enabled] = button.value.asInteger;
+	});
+	number = StaticText(rowArea, Rect(42, y + 2, 36, 14)).string_((i + 1).asString).font_(smallFont.boldVariant).stringColor_(colors[\text]).align_(\center).background_(Color.clear);
+	preset = PopUpMenu(rowArea, Rect(92, y, 330, 20)).items_(["EMPTY"]).font_(smallFont).background_(colors[\panel2]).stringColor_(colors[\text]).action_({ |menu|
+		songRows[i][\preset] = if(menu.value == 0) { "" } { presetNames[menu.value - 1] };
+		if(menu.value > 0) { songRows[i][\enabled] = 1; enable.value_(1) };
+	});
+	bars = NumberBox(rowArea, Rect(434, y, 46, 20)).value_(4).clipLo_(1).clipHi_(128).font_(smallFont).background_(colors[\panel2]).stringColor_(colors[\text]).normalColor_(colors[\text]).typingColor_(colors[\text]).action_({ |box|
+		songRows[i][\bars] = box.value.clip(1, 128).asInteger;
+	});
+	up = Button(rowArea, Rect(492, y, 28, 20)).states_([["UP", colors[\text], colors[\panel2]]]).font_(smallFont).action_({ moveRow.(i, -1) });
+	down = Button(rowArea, Rect(524, y, 34, 20)).states_([["DN", colors[\text], colors[\panel2]]]).font_(smallFont).action_({ moveRow.(i, 1) });
+	play = Button(rowArea, Rect(568, y, 58, 20)).states_([["SEND", colors[\text], colors[\panel2]]]).font_(smallFont.boldVariant).action_({
+		if(songRows[i][\preset].size > 0) {
+			currentRow = i;
+			currentBar = 0;
+			sendPreset.(songRows[i][\preset]);
+			refreshRows.();
+		};
+	});
+	(enable: enable, number: number, preset: preset, bars: bars, up: up, down: down, play: play)
+});
+
+StaticText(root, Rect(0, 710, 736, 18))
+	.string_("Song rows send preset names by OSC to the main groovebox. Keep the groovebox open before pressing PLAY.")
+	.font_(smallFont)
+	.stringColor_(colors[\muted])
+	.align_(\center)
+	.background_(Color.clear);
+
+updateTarget.();
+loadPresets.();
+if(File.exists(songPath)) { loadSong.() };
+refreshRows.();
+
+win.onClose_({
+	stopSong.();
+});
+)
