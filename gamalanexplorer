@@ -1,0 +1,628 @@
+/*
+Gamelan Explorer
+----------------
+A self-contained SuperCollider patch for exploring slendro composition.
+
+Features:
+  - Five physically inspired modal instrument models
+  - 16-step ensemble sequencer in an equal five-tone slendro approximation
+  - Editable on/off pattern for every instrument
+  - Instrument selector, five note pads, and A/S/D/F/G keyboard playing
+  - Step recording from pads/keys, live or one step at a time
+  - Per-instrument attack, decay, gain, brightness, and three-band EQ
+  - Tempo, swing, root frequency, master level, pattern randomization
+  - Selectable stereo WAV recording
+
+Run the whole file with Cmd/Ctrl+Enter.
+*/
+
+(
+s.waitForBoot {
+    var win, instrumentMenu, noteButtons, stepButtons, enableBoxes;
+    var playButton, sequenceRecordButton, audioRecordButton, chooseFileButton;
+    var tempoSlider, swingSlider, masterSlider;
+    var rootBox, statusText, playhead, recordDir, recordPath;
+    var names, prettyNames, colors, patterns, degrees, enabled, levels, voiceParams;
+    var octaveOffsets, synthNames, selectedInstrument, currentStep, sequenceRecordArmed;
+    var makeLabel, playNote, playAndProgramNote, programNote;
+    var startSequencer, stopSequencer;
+    var randomizePatterns, resetPatterns, updateStatus, cleanup;
+    var paramKeys, paramNames, paramSpecs, paramSliders, paramValues;
+    var updateParamPanel, makeParamControl, formatParam;
+    var bg, panel, ink, muted;
+
+    // ---------- Palette and shared musical state ----------
+
+    bg = Color(0.075, 0.065, 0.055);
+    panel = Color(0.14, 0.115, 0.085);
+    ink = Color(0.96, 0.88, 0.68);
+    muted = Color(0.57, 0.50, 0.39);
+
+    names = [\saron, \gender, \bonang, \gambang, \gong];
+    prettyNames = ["Saron", "Gender", "Bonang", "Gambang", "Gong Ageng"];
+    colors = [
+        Color(0.84, 0.36, 0.18),
+        Color(0.27, 0.60, 0.67),
+        Color(0.90, 0.64, 0.18),
+        Color(0.49, 0.69, 0.31),
+        Color(0.55, 0.38, 0.68)
+    ];
+
+    // Five-tone equal division of the octave is used as a neutral slendro
+    // approximation. Real ensembles have individual, deliberately paired tunings.
+    ~gamelanRoot = 220;
+    ~gamelanTempo = 96;
+    ~gamelanSwing = 0.0;
+    ~gamelanMaster = 0.75;
+    selectedInstrument = 0;
+    currentStep = 0;
+    sequenceRecordArmed = false;
+
+    degrees = IdentityDictionary[
+        \saron   -> [0, 1, 2, 3, 4, 3, 2, 1, 0, 2, 4, 3, 1, 2, 3, 4],
+        \gender  -> [0, 2, 4, 2, 1, 3, 0, 3, 4, 1, 3, 1, 2, 4, 1, 3],
+        \bonang  -> [4, 2, 3, 1, 2, 0, 1, 4, 3, 1, 2, 0, 4, 2, 1, 3],
+        \gambang -> [0, 3, 1, 4, 2, 0, 3, 1, 4, 2, 0, 3, 1, 4, 2, 3],
+        \gong    -> [0, 0, 2, 0, 4, 0, 2, 0, 0, 0, 3, 0, 1, 0, 4, 0]
+    ];
+
+    patterns = IdentityDictionary[
+        \saron   -> [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+        \gender  -> [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0],
+        \bonang  -> [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+        \gambang -> [1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1],
+        \gong    -> [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]
+    ];
+
+    enabled = IdentityDictionary.new;
+    levels = IdentityDictionary[
+        \saron -> 0.55, \gender -> 0.42, \bonang -> 0.42,
+        \gambang -> 0.48, \gong -> 0.62
+    ];
+    octaveOffsets = IdentityDictionary[
+        \saron -> 0, \gender -> 0, \bonang -> 1,
+        \gambang -> 1, \gong -> -2
+    ];
+    names.do { |name| enabled[name] = true };
+    voiceParams = IdentityDictionary[
+        \saron -> (attack: 0.003, decay: 2.2, gain: 1.0, brightness: 0.72, lowEq: 0, midEq: 0, highEq: 0),
+        \gender -> (attack: 0.004, decay: 4.5, gain: 1.0, brightness: 0.78, lowEq: 0, midEq: 0, highEq: 0),
+        \bonang -> (attack: 0.002, decay: 2.8, gain: 1.0, brightness: 0.74, lowEq: 0, midEq: 0, highEq: 0),
+        \gambang -> (attack: 0.002, decay: 1.25, gain: 1.0, brightness: 0.82, lowEq: 0, midEq: 0, highEq: 0),
+        \gong -> (attack: 0.012, decay: 9.0, gain: 1.0, brightness: 0.48, lowEq: 0, midEq: 0, highEq: 0)
+    ];
+
+    // ---------- Physically inspired modal models ----------
+
+    SynthDef(\gxSaron, { |out=0, freq=220, amp=0.3, pan=0, attack=0.003,
+        decay=2.2, brightness=0.72, lowEq=0, midEq=0, highEq=0|
+        var strike, modes, sig, body, env;
+        strike = PinkNoise.ar(1) * EnvGen.ar(Env.perc(0.0005, 0.018, 1, -8));
+        modes = [
+            Ringz.ar(strike, freq * 1.00, decay),
+            Ringz.ar(strike, freq * 2.03, decay * 0.68) * 0.42,
+            Ringz.ar(strike, freq * 3.02, decay * 0.45) * 0.24,
+            Ringz.ar(strike, freq * 4.18, decay * 0.30) * 0.13,
+            Ringz.ar(strike, freq * 5.41, decay * 0.20) * 0.08
+        ].sum;
+        body = BPF.ar(strike, freq * 0.72, 0.32) * 0.14;
+        env = EnvGen.kr(Env.perc(attack, decay * 1.25), doneAction: 2);
+        sig = LeakDC.ar((modes + body).tanh);
+        sig = LPF.ar(sig, brightness.linexp(0, 1, 700, 18000));
+        sig = BLowShelf.ar(sig, 180, 0.7, lowEq);
+        sig = BPeakEQ.ar(sig, 1200, 0.8, midEq);
+        sig = BHiShelf.ar(sig, 5000, 0.7, highEq) * env * amp;
+        Out.ar(out, Pan2.ar(sig, pan));
+    }).add;
+
+    SynthDef(\gxGender, { |out=0, freq=220, amp=0.3, pan=0, attack=0.004,
+        decay=4.5, brightness=0.78, lowEq=0, midEq=0, highEq=0|
+        var strike, shimmer, sig, env;
+        strike = WhiteNoise.ar(0.65) * EnvGen.ar(Env.perc(0.001, 0.035, 1, -6));
+        shimmer = [
+            Ringz.ar(strike, freq * 1.00, decay),
+            Ringz.ar(strike, freq * 1.52, decay * 0.84) * 0.32,
+            Ringz.ar(strike, freq * 2.01, decay * 0.76) * 0.50,
+            Ringz.ar(strike, freq * 2.98, decay * 0.50) * 0.18,
+            Ringz.ar(strike, freq * 4.07, decay * 0.35) * 0.10
+        ].sum;
+        shimmer = shimmer * SinOsc.kr(5.2, 0, 0.10, 0.90);
+        env = EnvGen.kr(Env.perc(attack, decay * 1.15), doneAction: 2);
+        sig = (shimmer + FreeVerb.ar(shimmer, 0.22, 0.75, 0.55) * 0.35);
+        sig = LPF.ar(LeakDC.ar(sig).softclip, brightness.linexp(0, 1, 700, 18000));
+        sig = BLowShelf.ar(sig, 180, 0.7, lowEq);
+        sig = BPeakEQ.ar(sig, 1200, 0.8, midEq);
+        sig = BHiShelf.ar(sig, 5000, 0.7, highEq);
+        Out.ar(out, Pan2.ar(sig * env * amp, pan));
+    }).add;
+
+    SynthDef(\gxBonang, { |out=0, freq=220, amp=0.3, pan=0, attack=0.002,
+        decay=2.8, brightness=0.74, lowEq=0, midEq=0, highEq=0|
+        var beater, boss, bowl, sig, env;
+        beater = HPF.ar(PinkNoise.ar(0.8), 1200)
+            * EnvGen.ar(Env.perc(0.0003, 0.012, 1, -10));
+        boss = Ringz.ar(beater, freq, decay);
+        bowl = [
+            Ringz.ar(beater, freq * 1.43, decay * 0.70) * 0.45,
+            Ringz.ar(beater, freq * 2.08, decay * 0.50) * 0.30,
+            Ringz.ar(beater, freq * 2.72, decay * 0.35) * 0.18,
+            Ringz.ar(beater, freq * 4.31, decay * 0.20) * 0.08
+        ].sum;
+        env = EnvGen.kr(Env.perc(attack, decay * 1.2), doneAction: 2);
+        sig = (boss + bowl + (beater * 0.08)).tanh;
+        sig = LPF.ar(sig, brightness.linexp(0, 1, 700, 18000));
+        sig = BLowShelf.ar(sig, 180, 0.7, lowEq);
+        sig = BPeakEQ.ar(sig, 1200, 0.8, midEq);
+        sig = BHiShelf.ar(sig, 5000, 0.7, highEq) * env * amp;
+        Out.ar(out, Pan2.ar(sig, pan));
+    }).add;
+
+    SynthDef(\gxGambang, { |out=0, freq=220, amp=0.3, pan=0, attack=0.002,
+        decay=1.25, brightness=0.82, lowEq=0, midEq=0, highEq=0|
+        var mallet, wood, sig, env;
+        mallet = LPF.ar(WhiteNoise.ar(0.9), 5200)
+            * EnvGen.ar(Env.perc(0.0005, 0.016, 1, -9));
+        wood = [
+            Ringz.ar(mallet, freq, decay),
+            Ringz.ar(mallet, freq * 2.76, decay * 0.42) * 0.30,
+            Ringz.ar(mallet, freq * 5.40, decay * 0.19) * 0.12,
+            Ringz.ar(mallet, freq * 8.93, decay * 0.10) * 0.05
+        ].sum;
+        env = EnvGen.kr(Env.perc(attack, decay * 1.35), doneAction: 2);
+        sig = (wood + BPF.ar(mallet, freq * 1.7, 0.7) * 0.16);
+        sig = LPF.ar(LeakDC.ar(sig).softclip, brightness.linexp(0, 1, 700, 18000));
+        sig = BLowShelf.ar(sig, 180, 0.7, lowEq);
+        sig = BPeakEQ.ar(sig, 1200, 0.8, midEq);
+        sig = BHiShelf.ar(sig, 5000, 0.7, highEq);
+        Out.ar(out, Pan2.ar(sig * env * amp, pan));
+    }).add;
+
+    SynthDef(\gxGong, { |out=0, freq=55, amp=0.35, pan=0, attack=0.012,
+        decay=9, brightness=0.48, lowEq=0, midEq=0, highEq=0|
+        var strike, bloom, high, sig, env;
+        strike = LPF.ar(PinkNoise.ar(1.2), 1800)
+            * EnvGen.ar(Env.perc(0.002, 0.07, 1, -6));
+        bloom = [
+            Ringz.ar(strike, freq * 0.99, decay),
+            Ringz.ar(strike, freq * 1.41, decay * 0.85) * 0.34,
+            Ringz.ar(strike, freq * 2.03, decay * 0.72) * 0.46,
+            Ringz.ar(strike, freq * 2.57, decay * 0.55) * 0.24,
+            Ringz.ar(strike, freq * 3.91, decay * 0.38) * 0.15
+        ].sum;
+        high = Ringz.ar(strike, freq * 6.17, decay * 0.20) * 0.07;
+        env = EnvGen.kr(Env.perc(attack, decay * 1.1), doneAction: 2);
+        sig = LPF.ar((bloom + high).tanh, brightness.linexp(0, 1, 500, 14000));
+        sig = BLowShelf.ar(sig, 180, 0.7, lowEq);
+        sig = BPeakEQ.ar(sig, 1200, 0.8, midEq);
+        sig = BHiShelf.ar(sig, 5000, 0.7, highEq) * env * amp;
+        Out.ar(out, Pan2.ar(sig, pan));
+    }).add;
+
+    SynthDef(\gxMaster, { |in=0, out=0, amp=0.75|
+        var sig;
+        sig = In.ar(in, 2);
+        sig = CompanderD.ar(sig, 0.72, 1, 0.28, 0.004, 0.12);
+        sig = Limiter.ar(sig * amp, 0.92, 0.01);
+        ReplaceOut.ar(out, sig);
+    }).add;
+
+    s.sync;
+
+    synthNames = IdentityDictionary[
+        \saron -> \gxSaron, \gender -> \gxGender, \bonang -> \gxBonang,
+        \gambang -> \gxGambang, \gong -> \gxGong
+    ];
+
+    ~gamelanMasterSynth = Synth.tail(s, \gxMaster, [\amp, ~gamelanMaster]);
+    ~gamelanClock = TempoClock(~gamelanTempo / 60);
+
+    // ---------- Playback and sequencing ----------
+
+    playNote = { |name, degree=0, velocity=1.0, pan=0|
+        var octave, frequency, level, params;
+        octave = octaveOffsets[name];
+        params = voiceParams[name];
+        frequency = ~gamelanRoot * (2 ** ((degree + (octave * 5)) / 5));
+        level = levels[name] * params[\gain] * velocity;
+        Synth.before(~gamelanMasterSynth, synthNames[name], [
+            \freq, frequency.clip(28, 9000),
+            \amp, level,
+            \pan, pan.clip(-0.9, 0.9),
+            \attack, params[\attack],
+            \decay, params[\decay],
+            \brightness, params[\brightness],
+            \lowEq, params[\lowEq],
+            \midEq, params[\midEq],
+            \highEq, params[\highEq]
+        ]);
+    };
+
+    updateStatus = { |text|
+        { statusText.string_(text) }.defer;
+    };
+
+    programNote = { |degree|
+        var name, row, step;
+        name = names[selectedInstrument];
+        row = selectedInstrument;
+        step = currentStep;
+
+        degrees[name][step] = degree;
+        patterns[name][step] = 1;
+        stepButtons[row][step]
+            .states_([
+                ["", muted, Color(0.18, 0.15, 0.12)],
+                [degree.asString, Color.white, colors[row]]
+            ])
+            .value_(1);
+
+        // Stopped = classic step entry. Running = real-time quantized entry.
+        if(~gamelanRoutine.isNil) {
+            currentStep = (currentStep + 1) % 16;
+            playhead.bounds_(Rect(201 + (currentStep * 42), 158, 34, 3));
+        };
+        updateStatus.(
+            "Programmed " ++ prettyNames[row] ++ " degree " ++
+            ["1", "2", "3", "5", "6"][degree] ++ " at step " ++ (step + 1)
+        );
+    };
+
+    playAndProgramNote = { |degree|
+        playNote.(names[selectedInstrument], degree, 0.9, 0);
+        if(sequenceRecordArmed) { programNote.(degree) };
+    };
+
+    startSequencer = {
+        if(~gamelanRoutine.notNil) { ~gamelanRoutine.stop };
+        ~gamelanClock.tempo = ~gamelanTempo / 60;
+        ~gamelanRoutine = Routine({
+            var count;
+            count = 0;
+            loop {
+                var step, swingFactor;
+                step = count % 16;
+                currentStep = step;
+
+                names.do { |name, index|
+                    var velocity, pan;
+                    if(enabled[name] and: { patterns[name][step] == 1 }) {
+                        velocity = if(step % 4 == 0, 1.0, 0.72 + 0.18.rand);
+                        pan = ((index - 2) * 0.22) + 0.08.rand2;
+                        playNote.(name, degrees[name][step], velocity, pan);
+                    };
+                };
+
+                {
+                    if(playhead.notNil) {
+                        playhead.bounds_(Rect(201 + (step * 42), 158, 34, 3));
+                    };
+                }.defer;
+
+                swingFactor = if(step.even, 1 + ~gamelanSwing, 1 - ~gamelanSwing);
+                (0.25 * swingFactor).wait;
+                count = count + 1;
+            };
+        }).play(~gamelanClock, quant: 1);
+        updateStatus.("Sequencer running — step patterns are live-editable.");
+    };
+
+    stopSequencer = {
+        if(~gamelanRoutine.notNil) {
+            ~gamelanRoutine.stop;
+            ~gamelanRoutine = nil;
+        };
+        updateStatus.("Sequencer stopped. Play notes with A S D F G.");
+    };
+
+    randomizePatterns = {
+        names.do { |name, row|
+            var probability;
+            probability = [0.78, 0.46, 0.50, 0.38, 0.10][row];
+            16.do { |step|
+                patterns[name][step] = probability.coin.asInteger;
+                stepButtons[row][step].value_(patterns[name][step]);
+            };
+        };
+        patterns[\gong][0] = 1;
+        stepButtons[4][0].value_(1);
+        updateStatus.("New ensemble pattern generated.");
+    };
+
+    resetPatterns = {
+        var defaults;
+        defaults = [
+            [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+            [1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0],
+            [0,1,0,1,0,1,0,1,0,1,0,1,0,1,0,1],
+            [1,0,0,1,0,1,0,0,1,0,1,0,0,1,0,1],
+            [1,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0]
+        ];
+        names.do { |name, row|
+            patterns[name] = defaults[row].copy;
+            16.do { |step| stepButtons[row][step].value_(patterns[name][step]) };
+        };
+        updateStatus.("Core pattern restored.");
+    };
+
+    paramKeys = [\attack, \decay, \gain, \brightness, \lowEq, \midEq, \highEq];
+    paramNames = ["Attack", "Decay", "Gain", "Brightness", "Bass EQ", "Mid EQ", "Treble EQ"];
+    paramSpecs = [
+        ControlSpec(0.001, 0.5, \exp, 0, 0.003),
+        ControlSpec(0.15, 14.0, \exp, 0, 2.2),
+        ControlSpec(0.0, 2.0, \lin, 0, 1.0),
+        ControlSpec(0.0, 1.0, \lin, 0, 0.72),
+        ControlSpec(-12, 12, \lin, 0, 0),
+        ControlSpec(-12, 12, \lin, 0, 0),
+        ControlSpec(-12, 12, \lin, 0, 0)
+    ];
+    paramSliders = Array.newClear(paramKeys.size);
+    paramValues = Array.newClear(paramKeys.size);
+
+    formatParam = { |index, value|
+        case
+        { index == 0 } { value.round(0.001).asString ++ " s" }
+        { index == 1 } { value.round(0.01).asString ++ " s" }
+        { index == 2 } { value.round(0.01).asString ++ " x" }
+        { index == 3 } { (value * 100).round(1).asString ++ "%" }
+        { true } {
+            (if(value >= 0, "+", "") ++ value.round(0.1).asString ++ " dB")
+        };
+    };
+
+    // ---------- Interface ----------
+
+    win = Window("Gamelan Explorer — Slendro Laboratory", Rect(80, 40, 930, 750))
+        .background_(bg)
+        .front;
+
+    makeLabel = { |text, bounds, size=13, color|
+        StaticText(win, bounds)
+            .string_(text)
+            .font_(Font("Helvetica", size))
+            .stringColor_(color ? ink);
+    };
+
+    makeLabel.("GAMELAN EXPLORER", Rect(24, 18, 310, 32), 24, ink);
+    makeLabel.("five-tone slendro composition laboratory", Rect(26, 49, 340, 20), 12, muted);
+
+    playButton = Button(win, Rect(532, 22, 78, 35))
+        .states_([
+            ["PLAY", ink, Color(0.25, 0.20, 0.14)],
+            ["STOP", Color.white, Color(0.69, 0.25, 0.14)]
+        ])
+        .font_(Font("Helvetica", 13, true))
+        .action_({ |button|
+            if(button.value == 1) { startSequencer.() } { stopSequencer.() };
+        });
+
+    sequenceRecordButton = Button(win, Rect(618, 22, 88, 35))
+        .states_([
+            ["STEP REC", ink, Color(0.25, 0.20, 0.14)],
+            ["STEP ARMED", Color.white, Color(0.75, 0.12, 0.10)]
+        ])
+        .font_(Font("Helvetica", 10, true))
+        .action_({ |button|
+            sequenceRecordArmed = button.value == 1;
+            if(sequenceRecordArmed) {
+                updateStatus.("Step recording armed — pads and A S D F G now program the selected lane.");
+            } {
+                updateStatus.("Step recording disarmed.");
+            };
+        });
+
+    audioRecordButton = Button(win, Rect(714, 22, 90, 35))
+        .states_([
+            ["AUDIO REC", ink, Color(0.25, 0.20, 0.14)],
+            ["STOP AUDIO", Color.white, Color(0.75, 0.12, 0.10)]
+        ])
+        .font_(Font("Helvetica", 10, true))
+        .action_({ |button|
+            if(button.value == 1) {
+                if(recordPath.isNil) {
+                    recordDir = thisProcess.nowExecutingPath.dirname +/+ "recordings";
+                    PathName(recordDir).mkdir;
+                    recordPath = recordDir +/+ ("gamelan-" ++ Date.localtime.stamp ++ ".wav");
+                };
+                s.recHeaderFormat = "wav";
+                s.recSampleFormat = "float";
+                s.prepareForRecord(recordPath, 2);
+                s.record;
+                updateStatus.("Recording: " ++ recordPath.basename);
+            } {
+                s.stopRecording;
+                updateStatus.("Recording saved: " ++ recordPath);
+            };
+        });
+
+    chooseFileButton = Button(win, Rect(812, 22, 94, 35))
+        .states_([["CHOOSE WAV", ink, Color(0.25, 0.20, 0.14)]])
+        .font_(Font("Helvetica", 10, true))
+        .action_({
+            if(s.recorder.isRecording) {
+                updateStatus.("Stop audio recording before choosing a new file.");
+            } {
+                recordDir = thisProcess.nowExecutingPath.dirname +/+ "recordings";
+                PathName(recordDir).mkdir;
+                Dialog.savePanel(
+                    { |path|
+                        recordPath = if(
+                            PathName(path).extension.asString.toLower == "wav",
+                            path,
+                            path ++ ".wav"
+                        );
+                        updateStatus.("Next audio recording: " ++ recordPath);
+                    },
+                    { updateStatus.("Audio file selection cancelled.") },
+                    recordDir
+                );
+            };
+        });
+
+    // Control strip.
+    UserView(win, Rect(20, 82, 886, 62)).background_(panel);
+    makeLabel.("TEMPO", Rect(34, 91, 60, 17), 10, muted);
+    tempoSlider = Slider(win, Rect(34, 112, 150, 20))
+        .value_((~gamelanTempo - 40) / 140)
+        .action_({ |slider|
+            ~gamelanTempo = slider.value.linlin(0, 1, 40, 180);
+            ~gamelanClock.tempo = ~gamelanTempo / 60;
+            updateStatus.(~gamelanTempo.round(1).asString ++ " BPM");
+        });
+
+    makeLabel.("SWING", Rect(211, 91, 60, 17), 10, muted);
+    swingSlider = Slider(win, Rect(211, 112, 130, 20))
+        .value_(0)
+        .action_({ |slider|
+            ~gamelanSwing = slider.value.linlin(0, 1, 0, 0.55);
+        });
+
+    makeLabel.("ROOT Hz", Rect(373, 91, 70, 17), 10, muted);
+    rootBox = NumberBox(win, Rect(373, 110, 78, 24))
+        .value_(~gamelanRoot)
+        .clipLo_(40)
+        .clipHi_(880)
+        .action_({ |box| ~gamelanRoot = box.value });
+
+    makeLabel.("MASTER", Rect(488, 91, 70, 17), 10, muted);
+    masterSlider = Slider(win, Rect(488, 112, 130, 20))
+        .value_(~gamelanMaster)
+        .action_({ |slider|
+            ~gamelanMaster = slider.value;
+            ~gamelanMasterSynth.set(\amp, ~gamelanMaster);
+        });
+
+    Button(win, Rect(650, 101, 110, 29))
+        .states_([["RANDOMIZE", ink, Color(0.25, 0.20, 0.14)]])
+        .action_({ randomizePatterns.() });
+    Button(win, Rect(772, 101, 110, 29))
+        .states_([["RESET", ink, Color(0.25, 0.20, 0.14)]])
+        .action_({ resetPatterns.() });
+
+    // Sequencer grid.
+    makeLabel.("ENSEMBLE SEQUENCER", Rect(24, 157, 180, 21), 13, ink);
+    playhead = UserView(win, Rect(201, 158, 34, 3)).background_(Color(0.95, 0.70, 0.20));
+    16.do { |step|
+        makeLabel.((step + 1).asString, Rect(207 + (step * 42), 177, 28, 16), 9, muted);
+    };
+
+    stepButtons = Array.fill(5, { Array.newClear(16) });
+    enableBoxes = Array.newClear(5);
+
+    names.do { |name, row|
+        var y;
+        y = 200 + (row * 46);
+        enableBoxes[row] = CheckBox(win, Rect(25, y + 4, 22, 22))
+            .value_(true)
+            .action_({ |box| enabled[name] = box.value });
+        makeLabel.(prettyNames[row], Rect(52, y + 3, 135, 24), 12, colors[row]);
+
+        16.do { |step|
+            stepButtons[row][step] = Button(win, Rect(201 + (step * 42), y, 34, 30))
+                .states_([
+                    ["", muted, Color(0.18, 0.15, 0.12)],
+                    [degrees[name][step].asString, Color.white, colors[row]]
+                ])
+                .value_(patterns[name][step])
+                .action_({ |button|
+                    patterns[name][step] = button.value;
+                });
+        };
+    };
+
+    // Manual instrument panel.
+    UserView(win, Rect(20, 447, 886, 105)).background_(panel);
+    makeLabel.("PLAY INSTRUMENT", Rect(34, 458, 135, 18), 10, muted);
+    instrumentMenu = PopUpMenu(win, Rect(34, 480, 160, 30))
+        .items_(prettyNames)
+        .background_(Color(0.23, 0.19, 0.14))
+        .stringColor_(ink)
+        .action_({ |menu|
+            selectedInstrument = menu.value;
+            updateParamPanel.();
+        });
+
+    makeLabel.("A", Rect(264, 519, 18, 17), 9, muted);
+    makeLabel.("S", Rect(354, 519, 18, 17), 9, muted);
+    makeLabel.("D", Rect(444, 519, 18, 17), 9, muted);
+    makeLabel.("F", Rect(534, 519, 18, 17), 9, muted);
+    makeLabel.("G", Rect(624, 519, 18, 17), 9, muted);
+
+    noteButtons = Array.fill(5, { |degree|
+        Button(win, Rect(240 + (degree * 90), 470, 70, 43))
+            .states_([[
+                ["1", "2", "3", "5", "6"][degree],
+                Color.white,
+                colors[degree]
+            ]])
+            .font_(Font("Helvetica", 17, true))
+            .action_({
+                playAndProgramNote.(degree);
+            });
+    });
+
+    makeLabel.("Select a voice, then click the scale tones or use A S D F G.", Rect(680, 476, 200, 53), 11, ink);
+
+    // Per-instrument tone and envelope controls.
+    UserView(win, Rect(20, 562, 886, 148)).background_(panel);
+    makeLabel.("VOICE SHAPING — SETTINGS FOLLOW THE SELECTED INSTRUMENT", Rect(34, 572, 420, 18), 10, muted);
+
+    makeParamControl = { |index|
+        var row, column, x, y;
+        row = (index / 4).floor;
+        column = index % 4;
+        x = 34 + (column * 215);
+        y = 598 + (row * 52);
+
+        makeLabel.(paramNames[index], Rect(x, y, 72, 18), 10, ink);
+        paramSliders[index] = Slider(win, Rect(x + 72, y, 90, 20))
+            .action_({ |slider|
+                var value, name;
+                name = names[selectedInstrument];
+                value = paramSpecs[index].map(slider.value);
+                voiceParams[name][paramKeys[index]] = value;
+                paramValues[index].string_(formatParam.(index, value));
+            });
+        paramValues[index] = StaticText(win, Rect(x + 165, y, 48, 20))
+            .font_(Font("Helvetica", 9))
+            .stringColor_(muted);
+    };
+
+    paramKeys.size.do { |index| makeParamControl.(index) };
+
+    updateParamPanel = {
+        var params;
+        params = voiceParams[names[selectedInstrument]];
+        paramKeys.do { |key, index|
+            paramSliders[index].value_(paramSpecs[index].unmap(params[key]));
+            paramValues[index].string_(formatParam.(index, params[key]));
+        };
+    };
+    updateParamPanel.();
+
+    statusText = StaticText(win, Rect(24, 720, 882, 22))
+        .string_("Ready. Press PLAY or use A S D F G.")
+        .font_(Font("Helvetica", 11))
+        .stringColor_(muted);
+
+    win.view.keyDownAction_({ |view, char, modifiers, unicode, keycode|
+        var index;
+        index = [$a, $s, $d, $f, $g].indexOf(char.toLower);
+        if(index.notNil) {
+            playAndProgramNote.(index);
+        };
+    });
+
+    cleanup = {
+        if(~gamelanRoutine.notNil) { ~gamelanRoutine.stop };
+        if(s.recorder.isRecording) { s.stopRecording };
+        if(~gamelanMasterSynth.notNil) { ~gamelanMasterSynth.free };
+        ~gamelanRoutine = nil;
+    };
+
+    win.onClose_({ cleanup.() });
+    CmdPeriod.add({ { if(win.isClosed.not) { win.close } }.defer });
+    win.view.focus;
+
+    "Gamelan Explorer loaded. Use the GUI to play and sequence.".postln;
+};
+)
